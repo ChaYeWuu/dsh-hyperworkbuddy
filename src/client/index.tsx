@@ -1,0 +1,796 @@
+/**
+ * 浏览器半边：设置面板里的 WorkBuddy 一级菜单。
+ *
+ * 关键点是注册进 `settings.section` 槽——设置对话框左侧导航直接遍历该槽的
+ * 注册项渲染，所以这里出现的就是「设置里的一级选项」，不需要进入「插件」页。
+ *
+ * @module dsh-hyperworkbuddy/client
+ */
+
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import * as React from 'react'
+
+/** 稳定浏览器插件名。 */
+export const name = 'dsh-hyperworkbuddy-client'
+
+/** 本包名。 */
+export const BUNDLE_NAME = 'dsh-hyperworkbuddy'
+
+/** 需要注入的客户端服务。 */
+export const inject = ['slots', 'locale']
+
+/** 管理路由前缀，与 host 半边保持一致。 */
+const ROUTE_PREFIX = '/api-hyperworkbuddy'
+
+/** 文案字典。 */
+const zh = {
+  nav: 'WorkBuddy',
+  title: 'WorkBuddy 多账号',
+  subtitle: '管理国内版与国际版账号池，并把模型接进 DSH。',
+
+  endpointSection: 'OpenAI 兼容端点',
+  endpointSwitch: '对外提供 OpenAI 兼容端点',
+  endpointSwitchHint: '关闭只影响外部客户端（Codex / Claude Code 等）：端点停止监听并释放端口。DSH 里的 WorkBuddy 模型照常可用，不受影响。',
+  endpointOn: '对外已开启',
+  endpointOff: '对外已关闭',
+  endpointBindFailed: '对外端点未启动',
+  externalOnly: '仅外部客户端',
+  copy: '复制',
+  copied: '已复制',
+  apiKey: 'API Key',
+  apiKeyHint: '外部客户端填这个 Key；DSH 自身不需要。',
+  endpointHint: '把地址填进 Codex / Claude Code 等客户端的 Base URL。',
+
+  refresh: '重新扫描并刷新',
+  addAccount: '导入单个账号',
+  addHint: '粘贴 accessToken 可追加单个账号。',
+  importHub: '导入 hub 导出',
+  importHubHint: '粘贴 workbuddy2api-hub 的导出 JSON（或裸账号数组 / 单个账号对象），可一次导入多个账号。',
+  importHubPlaceholder: '{ "format": "workbuddy-accounts", "accounts": [ … ] }',
+  doImport: '导入',
+  importOk: '已导入 {n} 个账号',
+  importSkipped: '，跳过 {n} 个',
+  variant: '版本',
+  accessToken: 'accessToken',
+  uid: 'uid（可选）',
+  enterpriseId: 'enterpriseId（可选）',
+  nickname: '备注名（可选）',
+  cancel: '取消',
+
+  expand: '展开',
+  collapse: '收起',
+  accounts: '账号',
+  accountsEmpty: '该版本还没有账号。登录对应桌面 App，或在下方导入。',
+  remove: '移除',
+  enable: '启用',
+  disable: '停用',
+  refreshCredits: '刷新积分',
+  refreshCatalog: '刷新模型',
+  sourceDesktop: '桌面 App',
+  sourceManual: '导入',
+  statusReady: '可用',
+  statusDisabled: '已停用',
+  statusCooling: '冷却中',
+  statusExpired: '凭据过期',
+  credits: '积分',
+  creditsUnknown: '未获取',
+  creditsAt: '更新于',
+  packages: '套餐明细',
+  packagesNone: '没有可用套餐',
+  expiresAt: '到期',
+  lastError: '最近错误',
+  working: '处理中',
+
+  modelsSection: '模型开关',
+  modelsHint: '关掉的模型不会出现在 DSH 的模型选择器里；已经在用该模型的会话不受影响。',
+  showAll: '全部开启',
+  hideAll: '全部关闭',
+  noModels: '还没有模型。先点上面的「重新扫描并刷新」。',
+  gone: '上游已下架',
+  reasoning: '推理档位',
+  reasoningDefault: '默认',
+
+  loading: '加载中…',
+  loadFailed: '加载失败',
+  retry: '重试',
+  regionCn: '国内版',
+  regionGlobal: '国际版',
+}
+
+const en: typeof zh = {
+  nav: 'WorkBuddy',
+  title: 'WorkBuddy Accounts',
+  subtitle: 'Manage the CN and international account pools and bring their models into DSH.',
+
+  endpointSection: 'OpenAI-compatible endpoint',
+  endpointSwitch: 'Serve the OpenAI-compatible endpoint',
+  endpointSwitchHint: 'Turning this off only affects external clients (Codex / Claude Code): the listener stops and the port is released. The WorkBuddy models inside DSH keep working.',
+  endpointOn: 'Serving',
+  endpointOff: 'Not serving',
+  endpointBindFailed: 'External endpoint not running',
+  externalOnly: 'external clients only',
+  copy: 'Copy',
+  copied: 'Copied',
+  apiKey: 'API Key',
+  apiKeyHint: 'Use this key in external clients; DSH itself does not need it.',
+  endpointHint: 'Use this as the Base URL in Codex / Claude Code and other clients.',
+
+  refresh: 'Rescan and refresh',
+  addAccount: 'Import one account',
+  addHint: 'Paste an accessToken to add a single account.',
+  importHub: 'Import hub export',
+  importHubHint: 'Paste a workbuddy2api-hub export JSON (or a bare account array / single account object) to import many at once.',
+  importHubPlaceholder: '{ "format": "workbuddy-accounts", "accounts": [ … ] }',
+  doImport: 'Import',
+  importOk: 'Imported {n} account(s)',
+  importSkipped: ', skipped {n}',
+  variant: 'Variant',
+  accessToken: 'accessToken',
+  uid: 'uid (optional)',
+  enterpriseId: 'enterpriseId (optional)',
+  nickname: 'Label (optional)',
+  cancel: 'Cancel',
+
+  expand: 'Expand',
+  collapse: 'Collapse',
+  accounts: 'Accounts',
+  accountsEmpty: 'No accounts for this variant yet. Sign in to its desktop app, or import below.',
+  remove: 'Remove',
+  enable: 'Enable',
+  disable: 'Disable',
+  refreshCredits: 'Refresh credits',
+  refreshCatalog: 'Refresh models',
+  sourceDesktop: 'Desktop app',
+  sourceManual: 'Imported',
+  statusReady: 'Ready',
+  statusDisabled: 'Disabled',
+  statusCooling: 'Cooling down',
+  statusExpired: 'Expired',
+  credits: 'Credits',
+  creditsUnknown: 'not fetched',
+  creditsAt: 'updated',
+  packages: 'Packages',
+  packagesNone: 'no usable package',
+  expiresAt: 'Expires',
+  lastError: 'Last error',
+  working: 'Working',
+
+  modelsSection: 'Model switches',
+  modelsHint: 'A switched-off model disappears from the DSH picker; sessions already using it are unaffected.',
+  showAll: 'Enable all',
+  hideAll: 'Disable all',
+  noModels: 'No models yet. Press "Rescan and refresh" above.',
+  gone: 'no longer served',
+  reasoning: 'Reasoning levels',
+  reasoningDefault: 'default',
+
+  loading: 'Loading…',
+  loadFailed: 'Failed to load',
+  retry: 'Retry',
+  regionCn: 'CN',
+  regionGlobal: 'International',
+}
+
+/** 面板模型条目。 */
+interface PanelModel {
+  id: string
+  name: string
+  contextWindow: number
+  maxTokens: number
+  supportsImages: boolean
+  credits?: string
+  free: boolean
+  visible: boolean
+  available: boolean
+  /** 上游声明的推理档位；空数组表示该模型没有档位控件。 */
+  efforts: string[]
+  defaultEffort: string
+}
+
+/** 面板账号条目。 */
+interface PanelAccount {
+  account: string
+  variantId: string
+  source: 'desktop' | 'manual'
+  nickname: string
+  domain: string
+  disabled: boolean
+  cooling: boolean
+  cooldownRemainingMs: number
+  failStreak: number
+  lastError: string
+  expiresAtMs: number
+  expired: boolean
+  modelCount: number
+  catalogSource: 'live' | 'saved'
+  catalogError: string
+  credits?: { remaining?: number; total?: number; packages: { name: string; remain?: number; size?: number }[] }
+  creditsAtMs: number
+}
+
+/** 面板版本分区。 */
+interface PanelVariant {
+  id: string
+  displayName: string
+  appName: string
+  region: 'cn' | 'global'
+  authFile: string
+  /** 对外端点基地址；关闭时为空串。 */
+  baseUrl: string
+  port: number
+  /** 对外端点是否在监听。 */
+  externalRunning: boolean
+  /** 对外端点启动失败原因；空串表示正常。 */
+  externalError: string
+  providerRegistered: boolean
+  providerError: string
+  accounts: PanelAccount[]
+  models: PanelModel[]
+  hiddenCount: number
+  desktopError: string
+}
+
+/** 面板状态文档。 */
+interface PanelDocument {
+  ok: true
+  endpointEnabled: boolean
+  apiKey: string
+  apiKeysConfigured: boolean
+  variants: PanelVariant[]
+  importResult?: { imported: number; skipped: { index: number; reason: string }[]; error: string }
+}
+
+/** 面板组件收到的注入面。 */
+interface PanelInjected {
+  t: (key: keyof typeof zh, vars?: Record<string, string | number>) => string
+}
+
+/** 拉取状态文档。 */
+async function fetchStatus(): Promise<PanelDocument> {
+  const response = await fetch(`${ROUTE_PREFIX}/status`, { headers: { 'Accept': 'application/json' } })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return await response.json() as PanelDocument
+}
+
+/** 调用一个返回新状态文档的管理接口。 */
+async function postDocument(path: string, body: unknown): Promise<PanelDocument> {
+  const response = await fetch(`${ROUTE_PREFIX}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const payload = await response.json() as { document?: PanelDocument; error?: string }
+  if (payload.document !== undefined) return payload.document
+  throw new Error(payload.error ?? `HTTP ${response.status}`)
+}
+
+/** 格式化时间。 */
+function formatTime(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '—'
+  const date = new Date(ms)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+/** 格式化剩余时长。 */
+function formatDuration(ms: number): string {
+  if (ms <= 0) return '0s'
+  const seconds = Math.ceil(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.ceil(minutes / 60)}h`
+}
+
+const S = {
+  root: { display: 'flex', flexDirection: 'column', gap: '18px', padding: '4px 0 24px', fontSize: '13px' },
+  h1: { fontSize: '16px', fontWeight: 600, margin: 0 },
+  sub: { color: 'var(--dsw-alias-label-secondary, #888)', margin: '4px 0 0', fontSize: '12px' },
+  card: { border: '1px solid var(--dsw-alias-border-l2, #3333)', borderRadius: '10px', padding: '14px 16px' },
+  cardTitle: { fontSize: '13px', fontWeight: 600, margin: '0 0 10px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' as const },
+  row: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' as const },
+  mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px' },
+  btn: {
+    border: '1px solid var(--dsw-alias-border-l2, #3333)', background: 'transparent', color: 'inherit',
+    borderRadius: '6px', padding: '4px 10px', fontSize: '12px', cursor: 'pointer', fontFamily: 'inherit',
+  },
+  btnBusy: {
+    border: '1px solid var(--dsw-alias-border-l2, #3333)', background: 'transparent',
+    color: 'var(--dsw-alias-label-secondary, #888)', borderRadius: '6px', padding: '4px 10px',
+    fontSize: '12px', cursor: 'progress', fontFamily: 'inherit',
+  },
+  btnPrimary: {
+    border: '1px solid var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4a7dff)',
+    background: 'var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4a7dff)', color: '#fff',
+    borderRadius: '6px', padding: '4px 12px', fontSize: '12px', cursor: 'pointer', fontFamily: 'inherit',
+  },
+  input: {
+    border: '1px solid var(--dsw-alias-border-l2, #3333)', background: 'transparent', color: 'inherit',
+    borderRadius: '6px', padding: '5px 8px', fontSize: '12px', fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' as const,
+  },
+  badge: { borderRadius: '4px', padding: '1px 6px', fontSize: '11px', border: '1px solid var(--dsw-alias-border-l2, #3333)', whiteSpace: 'nowrap' as const },
+  badgeOk: { background: 'rgba(60,180,110,.15)', borderColor: 'rgba(60,180,110,.4)' },
+  badgeWarn: { background: 'rgba(230,160,40,.15)', borderColor: 'rgba(230,160,40,.4)' },
+  badgeOff: { background: 'rgba(140,140,140,.15)', borderColor: 'rgba(140,140,140,.4)' },
+  badgeInfo: { background: 'rgba(90,140,240,.15)', borderColor: 'rgba(90,140,240,.4)' },
+  accountRow: { border: '1px solid var(--dsw-alias-border-l2, #3333)', borderRadius: '8px', padding: '10px 12px', marginBottom: '8px' },
+  muted: { color: 'var(--dsw-alias-label-secondary, #888)', fontSize: '12px' },
+  error: { color: '#e05a5a', fontSize: '12px', wordBreak: 'break-all' as const },
+  variantHead: {
+    display: 'flex', alignItems: 'center', gap: '8px', paddingBottom: '8px', marginBottom: '10px',
+    borderBottom: '1px solid var(--dsw-alias-border-l2, #3333)',
+  },
+  modelGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '6px' },
+  modelCell: {
+    display: 'flex', alignItems: 'center', gap: '8px', border: '1px solid var(--dsw-alias-border-l2, #3333)',
+    borderRadius: '6px', padding: '6px 8px', fontSize: '12px',
+  },
+  switchRow: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', userSelect: 'none' as const },
+  // 全局进行中提示条：任何操作在跑都可见
+  progress: {
+    display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px',
+    color: 'var(--dsw-alias-label-secondary, #888)',
+    border: '1px solid var(--dsw-alias-border-l2, #3333)', borderRadius: '8px', padding: '6px 10px',
+  },
+  caret: { fontSize: '11px', width: '12px', display: 'inline-block', textAlign: 'center' as const },
+  pkgRow: { display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '12px', padding: '1px 0' },
+}
+
+/**
+ * 挂载面板。
+ *
+ * @param ctx - 浏览器插件上下文。
+ */
+export function apply(ctx: ClientContext): void {
+  const namespace = 'settings.hyperworkbuddy'
+  ctx.effect(() => ctx.locale.register(namespace, { zh, en }), 'dsh-hyperworkbuddy: copy')
+  const rawT = ctx.locale.bind(namespace) as unknown as (key: keyof typeof zh) => string
+  // 支持 {n} 占位符，用于「已导入 N 个」这类回执。
+  const t = (key: keyof typeof zh, vars?: Record<string, string | number>): string => {
+    let text = rawT(key)
+    if (vars !== undefined) {
+      for (const [name, value] of Object.entries(vars)) text = text.replace(`{${name}}`, String(value))
+    }
+    return text
+  }
+
+  try {
+    ctx.slots.inject('settings.section', () => ctx.slots.register({
+      name: 'settings.section',
+      id: 'hyperworkbuddy',
+      order: 55,
+      label: () => rawT('nav'),
+      inject: (): PanelInjected => ({ t }),
+    }, HyperWorkBuddyPanel as never) ?? (() => {}))
+  } catch (error: unknown) {
+    console.error('[dsh-hyperworkbuddy] settings.section 注册失败', error)
+  }
+}
+
+/**
+ * WorkBuddy 一级设置页。
+ *
+ * @param props - 槽位注入面。
+ * @returns 面板元素树。
+ */
+function HyperWorkBuddyPanel(props: PanelInjected): unknown {
+  const { t } = props
+  const { useCallback, useEffect, useState } = React
+  const h = React.createElement
+
+  const [doc, setDoc] = useState<PanelDocument | undefined>(undefined)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+  const [copied, setCopied] = useState('')
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const [openPkgs, setOpenPkgs] = useState<Record<string, boolean>>({})
+  const [openForm, setOpenForm] = useState<'' | 'single' | 'hub'>('')
+  const [form, setForm] = useState({ variantId: '', accessToken: '', uid: '', enterpriseId: '', nickname: '' })
+  const [hubText, setHubText] = useState('')
+  const [notice, setNotice] = useState('')
+
+  const load = useCallback(async () => {
+    try {
+      setDoc(await fetchStatus())
+      setError('')
+    } catch (err: unknown) {
+      setError(String(err))
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  /** 执行管理动作并替换状态文档。 */
+  const run = useCallback(async (key: string, path: string, body: unknown) => {
+    setBusy(key)
+    try {
+      setDoc(await postDocument(path, body))
+      setError('')
+    } catch (err: unknown) {
+      setError(String(err))
+    } finally {
+      setBusy('')
+    }
+  }, [])
+
+  const copyText = useCallback(async (key: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(key)
+      setTimeout(() => setCopied(''), 1500)
+    } catch {
+      // 剪贴板不可用时用户仍可手动选中
+    }
+  }, [])
+
+  if (error !== '' && doc === undefined) {
+    return h('div', { style: S.root },
+      h('div', { style: S.error }, `${t('loadFailed')}: ${error}`),
+      h('button', { style: S.btn, onClick: () => void load() }, t('retry')),
+    )
+  }
+  if (doc === undefined) return h('div', { style: S.root }, h('div', { style: S.muted }, t('loading')))
+
+  const busyAny = busy !== ''
+  /** 按钮：命中当前 busy key 时显示进行中文案并禁用。 */
+  const actionButton = (key: string, label: string, onClick: () => void, busyLabel?: string): unknown => {
+    const isBusy = busy === key
+    return h('button', {
+      style: isBusy ? S.btnBusy : S.btn,
+      disabled: busyAny,
+      onClick,
+    }, isBusy ? `${busyLabel ?? label} …` : label)
+  }
+
+  /** 一个账号卡片。 */
+  const accountCard = (account: PanelAccount): unknown => {
+    const statusLabel = account.disabled
+      ? t('statusDisabled')
+      : account.expired
+        ? t('statusExpired')
+        : account.cooling ? `${t('statusCooling')} ${formatDuration(account.cooldownRemainingMs)}` : t('statusReady')
+    const statusStyle = account.disabled
+      ? { ...S.badge, ...S.badgeOff }
+      : account.expired || account.cooling ? { ...S.badge, ...S.badgeWarn } : { ...S.badge, ...S.badgeOk }
+    const key = `${account.variantId}|${account.account}`
+
+    // 积分：只展示余量 > 0 的套餐，否则 60 多条里绝大多数是 0，没意义。
+    const credits = account.credits
+    const creditsText = credits === undefined
+      ? t('creditsUnknown')
+      : credits.remaining === undefined
+        ? '—'
+        : credits.total === undefined ? String(credits.remaining) : `${credits.remaining} / ${credits.total}`
+    const useful = (credits?.packages ?? []).filter(pkg => (pkg.remain ?? 0) > 0)
+    const pkgOpen = openPkgs[key] === true
+
+    return h('div', { style: S.accountRow, key },
+      h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+        h('div', { style: S.row },
+          h('span', { style: S.badge }, account.source === 'desktop' ? t('sourceDesktop') : t('sourceManual')),
+          h('span', { style: statusStyle }, statusLabel),
+          h('span', { style: { ...S.muted, ...S.mono } }, account.account),
+        ),
+        h('div', { style: S.row },
+          actionButton(`credits:${key}`, t('refreshCredits'), () => {
+            void run(`credits:${key}`, '/account/credits', { account: account.account, variantId: account.variantId })
+          }, t('working')),
+          actionButton(`catalog:${key}`, t('refreshCatalog'), () => {
+            void run(`catalog:${key}`, '/account/catalog', { account: account.account, variantId: account.variantId })
+          }, t('working')),
+          actionButton(`toggle:${key}`, account.disabled ? t('enable') : t('disable'), () => {
+            void run(`toggle:${key}`, '/account/toggle', {
+              account: account.account, variantId: account.variantId, disabled: !account.disabled,
+            })
+          }),
+          actionButton(`remove:${key}`, t('remove'), () => {
+            void run(`remove:${key}`, '/account/remove', { account: account.account, variantId: account.variantId })
+          }),
+        ),
+      ),
+      h('div', { style: { ...S.row, marginTop: '6px', gap: '16px' } },
+        h('span', { style: S.muted }, account.nickname === '' ? '—' : account.nickname),
+        account.domain === '' ? null : h('span', { style: S.muted }, account.domain),
+        h('span', { style: S.muted }, `${t('models')}: ${account.modelCount}`),
+        h('span', { style: S.muted }, `${t('expiresAt')}: ${formatTime(account.expiresAtMs)}`),
+      ),
+      h('div', { style: { ...S.row, marginTop: '6px', gap: '10px' } },
+        h('span', null, `${t('credits')}: `, h('strong', null, creditsText)),
+        credits === undefined ? null : h('span', { style: S.muted }, `${t('creditsAt')} ${formatTime(account.creditsAtMs)}`),
+        useful.length === 0 ? null : h('button', {
+          style: S.btn,
+          onClick: () => setOpenPkgs(prev => ({ ...prev, [key]: !pkgOpen })),
+        }, `${t('packages')}（${useful.length}）${pkgOpen ? ' ▾' : ' ▸'}`),
+      ),
+      pkgOpen
+        ? h('div', { style: { marginTop: '6px', paddingLeft: '8px' } },
+          useful.length === 0
+            ? h('div', { style: S.muted }, t('packagesNone'))
+            : useful.map((pkg, index) => h('div', { key: `${pkg.name}-${index}`, style: S.pkgRow },
+              h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, pkg.name),
+              h('span', { style: S.muted }, `${pkg.remain ?? 0}${pkg.size === undefined ? '' : ` / ${pkg.size}`}`),
+            )),
+        )
+        : null,
+      account.lastError === '' ? null : h('div', { style: { ...S.error, marginTop: '4px' } }, `${t('lastError')}: ${account.lastError}`),
+      account.catalogError === '' ? null : h('div', { style: { ...S.error, marginTop: '4px' } }, account.catalogError),
+    )
+  }
+
+  /** 一个版本分区（可折叠）。 */
+  const variantSection = (variant: PanelVariant): unknown => {
+    const regionLabel = variant.region === 'cn' ? t('regionCn') : t('regionGlobal')
+    const allVisible = variant.models.length > 0 && variant.models.every(m => m.visible)
+    const isCollapsed = collapsed[variant.id] === true
+    const visibleCount = variant.models.filter(m => m.visible).length
+
+    return h('div', { style: S.card, key: variant.id },
+      h('div', { style: { ...S.variantHead, marginBottom: isCollapsed ? 0 : '10px', borderBottom: isCollapsed ? 'none' : S.variantHead.borderBottom, paddingBottom: isCollapsed ? 0 : '8px' } },
+        h('button', {
+          style: { ...S.btn, padding: '2px 8px' },
+          onClick: () => setCollapsed(prev => ({ ...prev, [variant.id]: !isCollapsed })),
+          title: isCollapsed ? t('expand') : t('collapse'),
+        }, `${isCollapsed ? '▸' : '▾'} ${isCollapsed ? t('expand') : t('collapse')}`),
+        h('strong', null, variant.displayName),
+        h('span', { style: S.badge }, regionLabel),
+        h('span', {
+          style: variant.providerRegistered ? { ...S.badge, ...S.badgeOk } : { ...S.badge, ...S.badgeWarn },
+        }, variant.providerRegistered ? 'DSH 可用' : 'DSH 未就绪'),
+        h('span', { style: S.muted }, `${variant.accounts.length} 账号 · ${visibleCount}/${variant.models.length} 模型`),
+        isCollapsed ? null : (variant.baseUrl === ''
+          ? h('span', { style: { ...S.badge, ...S.badgeOff, marginLeft: 'auto' } }, t('endpointOff'))
+          : h('div', { style: { ...S.row, marginLeft: 'auto' } },
+            h('code', { style: { ...S.mono, maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, variant.baseUrl),
+            actionButton(`url:${variant.id}`, copied === `url:${variant.id}` ? t('copied') : t('copy'), () => {
+              void copyText(`url:${variant.id}`, variant.baseUrl)
+            }),
+          )),
+      ),
+
+      isCollapsed ? null : h('div', null,
+        variant.externalError === '' ? null
+          : h('div', { style: { ...S.error, marginBottom: '8px' } }, `${t('endpointBindFailed')}: ${variant.externalError}`),
+        variant.providerError === '' ? null
+          : h('div', { style: { ...S.error, marginBottom: '8px' } }, variant.providerError),
+        variant.desktopError === '' ? null
+          : h('div', { style: { ...S.muted, marginBottom: '8px' } }, variant.desktopError),
+
+        // 账号
+        h('div', { style: S.cardTitle }, `${t('accounts')}（${variant.accounts.length}）`),
+        variant.accounts.length === 0
+          ? h('div', { style: S.muted }, t('accountsEmpty'))
+          : variant.accounts.map(accountCard),
+
+        // 模型开关
+        h('div', { style: { ...S.cardTitle, marginTop: '14px', justifyContent: 'space-between' } },
+          h('span', null, `${t('modelsSection')}（${visibleCount}/${variant.models.length}）`),
+          h('div', { style: S.row },
+            actionButton(`models:${variant.id}:on`, t('showAll'), () => {
+              void run(`models:${variant.id}:on`, '/models', { variantId: variant.id, visible: true })
+            }, t('working')),
+            actionButton(`models:${variant.id}:off`, t('hideAll'), () => {
+              void run(`models:${variant.id}:off`, '/models', { variantId: variant.id, visible: false })
+            }, t('working')),
+          ),
+        ),
+        h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('modelsHint')),
+        variant.models.length === 0
+          ? h('div', { style: S.muted }, t('noModels'))
+          : h('div', { style: S.modelGrid },
+            variant.models.map(model => {
+              const modelKey = `model:${variant.id}:${model.id}`
+              return h('label', {
+                key: model.id,
+                style: { ...S.modelCell, opacity: model.visible ? 1 : 0.55, flexDirection: 'column', alignItems: 'stretch', gap: '2px' },
+                title: `${model.id}\nctx ${model.contextWindow} · max ${model.maxTokens}${model.supportsImages ? ' · 图片' : ''}${model.credits === undefined ? '' : ` · ${model.credits}`}`,
+              },
+                h('div', { style: { ...S.row, gap: '6px' } },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: model.visible,
+                    disabled: busyAny,
+                    onChange: () => {
+                      void run(modelKey, '/model', { variantId: variant.id, modelId: model.id, visible: !model.visible })
+                    },
+                  }),
+                  h('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, model.name),
+                  busy === modelKey ? h('span', { style: S.muted }, '…') : null,
+                  model.free ? h('span', { style: { ...S.badge, ...S.badgeOk } }, '免费') : null,
+                  model.available ? null : h('span', { style: { ...S.badge, ...S.badgeOff } }, t('gone')),
+                ),
+                model.efforts.length === 0
+                  ? null
+                  : h('div', { style: { ...S.row, gap: '4px', paddingLeft: '22px' } },
+                    h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('reasoning')}:`),
+                    model.efforts.map(effort => h('span', {
+                      key: effort,
+                      style: {
+                        ...S.badge,
+                        ...(effort === model.defaultEffort ? S.badgeInfo : {}),
+                        fontSize: '10px',
+                        padding: '0 4px',
+                      },
+                      title: effort === model.defaultEffort ? t('reasoningDefault') : undefined,
+                    }, effort)),
+                  ),
+              )
+            }),
+          ),
+      ),
+    )
+  }
+
+  return h('div', { style: S.root },
+    h('div', null,
+      h('h1', { style: S.h1 }, t('title')),
+      h('p', { style: S.sub }, t('subtitle')),
+    ),
+
+    // 全局进行中提示
+    busyAny
+      ? h('div', { style: S.progress },
+        h('span', null, '⟳'),
+        h('span', null, `${t('working')} …`),
+      )
+      : null,
+
+    // 对外端点总开关 + API Key
+    h('div', { style: S.card },
+      h('div', { style: S.cardTitle },
+        h('span', null, t('endpointSection')),
+        h('span', { style: S.badge }, t('externalOnly')),
+        h('span', {
+          style: doc.endpointEnabled ? { ...S.badge, ...S.badgeOk } : { ...S.badge, ...S.badgeOff },
+        }, doc.endpointEnabled ? t('endpointOn') : t('endpointOff')),
+      ),
+      h('label', { style: S.switchRow },
+        h('input', {
+          type: 'checkbox',
+          checked: doc.endpointEnabled,
+          disabled: busyAny,
+          onChange: () => {
+            void run('endpoint', '/endpoint', { enabled: !doc.endpointEnabled })
+          },
+        }),
+        h('span', null, t('endpointSwitch')),
+        busy === 'endpoint' ? h('span', { style: S.muted }, '⟳') : null,
+      ),
+      h('p', { style: { ...S.sub, marginTop: '4px' } }, t('endpointSwitchHint')),
+      h('div', { style: { ...S.row, marginTop: '10px' } },
+        h('span', { style: S.muted }, `${t('apiKey')}:`),
+        h('code', { style: { ...S.mono, flex: 1, wordBreak: 'break-all' } }, doc.apiKey === '' ? '—' : doc.apiKey),
+        actionButton('apikey', copied === 'apikey' ? t('copied') : t('copy'), () => {
+          void copyText('apikey', doc.apiKey)
+        }),
+      ),
+      h('p', { style: { ...S.sub, marginTop: '4px' } }, t('apiKeyHint')),
+      h('p', { style: { ...S.sub, marginTop: '2px' } }, t('endpointHint')),
+    ),
+
+    // 版本分区
+    doc.variants.map(variantSection),
+
+    // 刷新与导入
+    h('div', { style: S.card },
+      h('div', { style: { ...S.cardTitle, justifyContent: 'space-between' } },
+        h('span', null, t('importHub')),
+        h('div', { style: S.row },
+          actionButton('refresh', t('refresh'), () => {
+            void run('refresh', '/refresh', {})
+          }, t('working')),
+          h('button', {
+            style: S.btn,
+            onClick: () => setOpenForm(openForm === 'hub' ? '' : 'hub'),
+          }, t('importHub')),
+          h('button', {
+            style: S.btn,
+            onClick: () => {
+              setForm(f => ({ ...f, variantId: f.variantId === '' ? doc.variants[0]?.id ?? '' : f.variantId }))
+              setOpenForm(openForm === 'single' ? '' : 'single')
+            },
+          }, t('addAccount')),
+        ),
+      ),
+
+      notice === '' ? null : h('div', { style: { ...S.muted, marginBottom: '8px', color: 'inherit' } }, notice),
+
+      openForm === 'hub'
+        ? h('div', { style: { marginTop: '6px' } },
+          h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('importHubHint')),
+          h('textarea', {
+            style: { ...S.input, minHeight: '120px', resize: 'vertical', fontFamily: 'ui-monospace, monospace' },
+            placeholder: t('importHubPlaceholder'),
+            value: hubText,
+            onChange: (e: { target: { value: string } }) => setHubText(e.target.value),
+          }),
+          h('div', { style: { ...S.row, marginTop: '8px' } },
+            h('button', {
+              style: S.btnPrimary,
+              disabled: busyAny || hubText.trim() === '',
+              onClick: () => {
+                void (async () => {
+                  setBusy('import')
+                  try {
+                    const next = await postDocument('/import', { payload: hubText })
+                    setDoc(next)
+                    const result = next.importResult
+                    if (result !== undefined && result.error !== '') setNotice(result.error)
+                    else if (result !== undefined) {
+                      setNotice(
+                        t('importOk', { n: result.imported })
+                        + (result.skipped.length > 0 ? t('importSkipped', { n: result.skipped.length }) : ''),
+                      )
+                      setHubText('')
+                      setOpenForm('')
+                    }
+                    setError('')
+                  } catch (err: unknown) {
+                    setError(String(err))
+                  } finally {
+                    setBusy('')
+                  }
+                })()
+              },
+            }, busy === 'import' ? `${t('doImport')} …` : t('doImport')),
+            h('button', { style: S.btn, onClick: () => setOpenForm('') }, t('cancel')),
+          ),
+        )
+        : null,
+
+      openForm === 'single'
+        ? h('div', { style: { marginTop: '6px' } },
+          h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('addHint')),
+          h('div', { style: { display: 'grid', gap: '8px' } },
+            h('label', { style: S.muted }, t('variant'),
+              h('select', {
+                style: { ...S.input, marginTop: '4px' },
+                value: form.variantId,
+                onChange: (e: { target: { value: string } }) => setForm(f => ({ ...f, variantId: e.target.value })),
+              }, doc.variants.map(v => h('option', { key: v.id, value: v.id }, `${v.displayName}（${v.appName}）`))),
+            ),
+            h('label', { style: S.muted }, t('accessToken'),
+              h('textarea', {
+                style: { ...S.input, marginTop: '4px', minHeight: '60px', resize: 'vertical' },
+                value: form.accessToken,
+                onChange: (e: { target: { value: string } }) => setForm(f => ({ ...f, accessToken: e.target.value })),
+              }),
+            ),
+            h('label', { style: S.muted }, t('uid'),
+              h('input', {
+                style: { ...S.input, marginTop: '4px' }, value: form.uid,
+                onChange: (e: { target: { value: string } }) => setForm(f => ({ ...f, uid: e.target.value })),
+              }),
+            ),
+            h('label', { style: S.muted }, t('enterpriseId'),
+              h('input', {
+                style: { ...S.input, marginTop: '4px' }, value: form.enterpriseId,
+                onChange: (e: { target: { value: string } }) => setForm(f => ({ ...f, enterpriseId: e.target.value })),
+              }),
+            ),
+            h('label', { style: S.muted }, t('nickname'),
+              h('input', {
+                style: { ...S.input, marginTop: '4px' }, value: form.nickname,
+                onChange: (e: { target: { value: string } }) => setForm(f => ({ ...f, nickname: e.target.value })),
+              }),
+            ),
+          ),
+          h('div', { style: { ...S.row, marginTop: '10px' } },
+            h('button', {
+              style: S.btnPrimary,
+              disabled: busyAny || form.accessToken.trim() === '' || form.variantId === '',
+              onClick: () => {
+                void run('import', '/account/import', form).then(() => {
+                  setOpenForm('')
+                  setForm({ variantId: form.variantId, accessToken: '', uid: '', enterpriseId: '', nickname: '' })
+                })
+              },
+            }, busy === 'import' ? `${t('doImport')} …` : t('doImport')),
+            h('button', { style: S.btn, onClick: () => setOpenForm('') }, t('cancel')),
+          ),
+        )
+        : null,
+    ),
+
+    error === '' ? null : h('div', { style: S.error }, error),
+  )
+}

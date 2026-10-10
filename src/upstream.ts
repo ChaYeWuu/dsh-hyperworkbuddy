@@ -1,0 +1,611 @@
+/**
+ * WorkBuddy 上游 HTTP 客户端。
+ *
+ * 只负责把请求按上游要求发出、把失败分类；SSE 正文原样回传，解析交给调用方
+ * （回环端点直接 pipe 给客户端，DSH 侧交给 pi-ai）。
+ *
+ * @module dsh-hyperworkbuddy/upstream
+ */
+
+import type { WorkBuddyCredential } from './auth.ts'
+import { AI_VARIANT, CN_VARIANT, type WorkBuddyVariant } from './variants.ts'
+
+/** 上游失败分类。 */
+export type UpstreamErrorKind =
+  | 'hard_credit'
+  | 'soft_rate'
+  | 'session_dead'
+  | 'not_found'
+  | 'server'
+  | 'client'
+
+/** chat 结果：成功带原始响应，失败带分类与可展示文案。 */
+export type ChatResult =
+  | { ok: true; response: Response }
+  | { ok: false; status: number; kind: UpstreamErrorKind; message: string }
+
+/** 一条模型目录记录。 */
+export interface UpstreamModel {
+  id: string
+  name: string
+  contextWindow: number
+  maxTokens: number
+  supportsImages: boolean
+  reasoning: {
+    supports: boolean
+    onlyReasoning: boolean
+    supportedEfforts?: string[]
+    defaultEffort?: string
+    canDisableThinking: boolean
+  }
+  billing: { credits?: string; free: boolean }
+}
+
+/** 积分快照。 */
+export interface CreditSnapshot {
+  /** 合计剩余；无法确定时为 undefined。 */
+  remaining?: number
+  /** 合计额度；无法确定时为 undefined。 */
+  total?: number
+  /** 套餐明细。 */
+  packages: { name: string; remain?: number; size?: number }[]
+}
+
+const EFFORT_VALUES = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+const HARD_CREDIT_MARKERS = [
+  'insufficient credit', 'no credit', 'credit exhausted', 'credits exhausted', 'out of credit',
+  'quota exceeded', 'quota exhaust', 'payment required', 'credit not enough', 'not enough credit',
+  '积分不足', '额度不足', '余额不足', '积分用完', '额度用尽', '没有积分',
+] as const
+
+const SESSION_DEAD_MARKERS = ['Offline user session not found', '12153'] as const
+
+/** 上游错误体上限，避免异常大 body 吃内存。 */
+const ERROR_BODY_LIMIT = 4096
+
+/** 目录 / 计费等一次性 JSON 请求超时。 */
+const JSON_TIMEOUT_MS = 30_000
+
+/** 按 HTTP 状态与响应体把失败归类。 */
+export function classifyUpstreamError(status: number, body: string): UpstreamErrorKind {
+  if (status === 402) return 'hard_credit'
+  if (status === 401) return 'session_dead'
+  const lower = body.toLowerCase()
+  for (const marker of HARD_CREDIT_MARKERS) {
+    if (lower.includes(marker.toLowerCase()) || body.includes(marker)) return 'hard_credit'
+  }
+  for (const marker of SESSION_DEAD_MARKERS) {
+    if (body.includes(marker)) return 'session_dead'
+  }
+  if (status === 429) return 'soft_rate'
+  if (status === 404) return 'not_found'
+  if (status >= 500) return 'server'
+  return 'client'
+}
+
+/** 从上游 JSON 错误体里取可展示文案，优先本地化 displayMsg。 */
+export function extractDisplayErrorMessage(body: string): string | undefined {
+  const trimmed = body.trim()
+  // 上游偶尔返回 HTML 错误页（如网关的 401 页面）：取 title 即可，绝不回显整页。
+  if (trimmed.startsWith('<')) {
+    const title = /<title>([^<]{1,200})<\/title>/iu.exec(trimmed)
+    if (title !== null) return title[1]!.trim()
+    return undefined
+  }
+  if (!trimmed.startsWith('{')) return undefined
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+    const obj = parsed as Record<string, unknown>
+    const displayMsg = obj['displayMsg']
+    if (typeof displayMsg === 'object' && displayMsg !== null && !Array.isArray(displayMsg)) {
+      const localized = displayMsg as Record<string, unknown>
+      const zh = localized['zh']
+      if (typeof zh === 'string' && zh.trim() !== '') return zh.trim()
+      const en = localized['en']
+      if (typeof en === 'string' && en.trim() !== '') return en.trim()
+    }
+    const msg = obj['msg']
+    if (typeof msg === 'string' && msg.trim() !== '') return msg.trim()
+  } catch {
+    // 非 JSON body 不提供文案
+  }
+  return undefined
+}
+
+/** 登录域决定区域；空域按国内版处理。 */
+export function regionOf(domain: string): 'cn' | 'global' {
+  const lowered = domain.trim().toLowerCase()
+  if (lowered === 'workbuddy.ai' || lowered.endsWith('.workbuddy.ai')) return 'global'
+  return 'cn'
+}
+
+/** 该凭据对应的变体（按区域），用于取基地址与默认版本。 */
+export function variantOfCredential(credential: WorkBuddyCredential): WorkBuddyVariant {
+  return regionOf(credential.domain) === 'global' ? AI_VARIANT : CN_VARIANT
+}
+
+function chatBase(credential: WorkBuddyCredential): string {
+  return variantOfCredential(credential).chatBase
+}
+
+function billingBase(credential: WorkBuddyCredential): string {
+  return variantOfCredential(credential).billingBase
+}
+
+function originReferer(credential: WorkBuddyCredential): string {
+  return regionOf(credential.domain) === 'global'
+    ? variantOfCredential(credential).chatBase
+    : variantOfCredential(credential).billingBase
+}
+
+/** 所有上游请求共用的头。 */
+function commonHeaders(credential: WorkBuddyCredential): Record<string, string> {
+  const referer = originReferer(credential)
+  return {
+    'Accept': 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Origin': referer,
+    'Referer': `${referer}/`,
+    'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2',
+  }
+}
+
+/** chat 头：带 X-No-* 约定，绝不携带 refresh token。 */
+export function chatHeaders(credential: WorkBuddyCredential, userAgent: string, clientVersion: string): Record<string, string> {
+  return {
+    ...commonHeaders(credential),
+    'User-Agent': userAgent,
+    'Content-Type': 'application/json',
+    ...credential.uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': credential.uid },
+    ...credential.enterpriseId === ''
+      ? { 'X-No-Enterprise-Id': '1' }
+      : { 'X-Enterprise-Id': credential.enterpriseId },
+    ...credential.domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': credential.domain },
+    'X-IDE-Type': 'WorkBuddy',
+    'X-IDE-Name': 'WorkBuddy',
+    'X-IDE-Version': clientVersion,
+    'X-Product': 'SaaS',
+  }
+}
+
+/** 该变体的 chat User-Agent。 */
+export function clientUserAgent(credential: WorkBuddyCredential, clientVersion?: string): string {
+  const variant = variantOfCredential(credential)
+  const version = clientVersion ?? variant.defaultClientVersion
+  return variant.region === 'global'
+    ? `WorkBuddy/${version} WorkBuddy AI/${version} CLI/2.63.2`
+    : `WorkBuddy/${version} WorkBuddy/${version} CLI/2.63.2`
+}
+
+/**
+ * 归一化 chat 请求体。
+ *
+ * 上游只接受流式；`tool_choice` 必须是字符串；`role: 'developer'` 要改写成
+ * `system`；国际版额外要求首条为 system。
+ *
+ * @param raw - 原始 JSON 字符串。
+ * @param region - 目标区域。
+ * @returns 归一化后的 JSON 字符串。
+ */
+export function prepareChatBody(raw: string, region: 'cn' | 'global'): string {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  const body = parsed as Record<string, unknown>
+  const messages = Array.isArray(body['messages']) ? body['messages'] as Record<string, unknown>[] : []
+  for (const message of messages) {
+    if (message['role'] === 'developer') message['role'] = 'system'
+  }
+  // 上游不接受对象形式的 tool_choice。
+  const toolChoice = body['tool_choice']
+  if (typeof toolChoice === 'object' && toolChoice !== null) {
+    const fn = (toolChoice as Record<string, unknown>)['function']
+    const name = typeof fn === 'object' && fn !== null
+      ? (fn as Record<string, unknown>)['name']
+      : undefined
+    body['tool_choice'] = typeof name === 'string' ? 'required' : 'auto'
+  }
+  if (region === 'global') {
+    if (body['reasoning_effort'] === 'off') delete body['reasoning_effort']
+    const first = messages[0]
+    if (first === undefined || first['role'] !== 'system') {
+      messages.unshift({ role: 'system', content: 'You are a helpful assistant.' })
+    }
+  }
+  body['messages'] = messages
+  body['stream'] = true
+  return JSON.stringify(body)
+}
+
+/** 把请求体里的 model 取出来，用于日志与冷却归属。 */
+export function modelOfBody(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const model = parsed['model']
+    return typeof model === 'string' ? model : ''
+  } catch {
+    return ''
+  }
+}
+
+/** 读取受限长度的错误体文本。 */
+async function readErrorBody(response: Response): Promise<string> {
+  try {
+    const text = await response.text()
+    return text.slice(0, ERROR_BODY_LIMIT)
+  } catch {
+    return ''
+  }
+}
+
+/** 发一条 chat 请求；成功返回原始 SSE 响应。 */
+export async function chatCompletions(
+  credential: WorkBuddyCredential,
+  rawBody: string,
+  signal?: AbortSignal,
+): Promise<ChatResult> {
+  const region = regionOf(credential.domain)
+  const prepared = prepareChatBody(rawBody, region)
+  const url = `${chatBase(credential)}/v2/chat/completions`
+  let response: Response
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...chatHeaders(credential, clientUserAgent(credential), variantOfCredential(credential).defaultClientVersion),
+        'Authorization': `Bearer ${credential.accessToken}`,
+      },
+      body: prepared,
+      ...signal === undefined ? {} : { signal },
+    })
+  } catch (error: unknown) {
+    return { ok: false, status: 0, kind: 'server', message: `连接上游失败：${String(error)}` }
+  }
+  if (!response.ok) {
+    const body = await readErrorBody(response)
+    const kind = classifyUpstreamError(response.status, body)
+    const detail = extractDisplayErrorMessage(body) ?? `上游返回 HTTP ${response.status}`
+    return { ok: false, status: response.status, kind, message: detail }
+  }
+  return { ok: true, response }
+}
+
+/** 解析一条目录行的模型元数据。 */
+function toUpstreamModel(row: Record<string, unknown>): UpstreamModel | undefined {
+  const id = typeof row['id'] === 'string' ? row['id'] : ''
+  if (id === '') return undefined
+  if (row['disabled'] === true) return undefined
+  const maxInput = Number(row['maxInputTokens'] ?? 0)
+  if (!Number.isFinite(maxInput) || maxInput <= 0) return undefined
+  const maxOutput = Number(row['maxOutputTokens'] ?? 0)
+  const contextRaw = row['contextWindow']
+  let contextWindow = maxInput
+  if (typeof contextRaw === 'object' && contextRaw !== null) {
+    const preferred = Number((contextRaw as Record<string, unknown>)['defaultLength'] ?? 0)
+    if (Number.isFinite(preferred) && preferred > 0) contextWindow = preferred
+  } else if (Number.isFinite(contextRaw) && Number(contextRaw) > 0) {
+    contextWindow = Number(contextRaw)
+  }
+  const reasoningRaw = typeof row['reasoning'] === 'object' && row['reasoning'] !== null
+    ? row['reasoning'] as Record<string, unknown>
+    : {}
+  const effortsRaw = reasoningRaw['supportedEfforts']
+  const supportedEfforts = Array.isArray(effortsRaw)
+    ? effortsRaw.filter((v): v is string => typeof v === 'string' && (EFFORT_VALUES as readonly string[]).includes(v))
+    : []
+  const creditsRaw = row['credits']
+  const credits = typeof creditsRaw === 'string' && creditsRaw.trim() !== ''
+    ? creditsRaw.trim().replace(/\s+credits?$/iu, '').trim()
+    : undefined
+  return {
+    id,
+    name: typeof row['name'] === 'string' && row['name'] !== '' ? row['name'] : id,
+    contextWindow,
+    // 上游未声明输出上限时按输入窗口的三分之一估一个安全值，而不是报 0。
+    maxTokens: Number.isFinite(maxOutput) && maxOutput > 0 ? maxOutput : Math.max(4096, Math.floor(contextWindow / 3)),
+    supportsImages: row['supportsImages'] === true && row['disabledMultimodal'] !== true,
+    reasoning: {
+      supports: row['supportsReasoning'] === true || reasoningRaw['supportedEfforts'] !== undefined,
+      onlyReasoning: reasoningRaw['onlyReasoning'] === true,
+      ...supportedEfforts.length === 0 ? {} : { supportedEfforts },
+      ...typeof reasoningRaw['defaultEffort'] === 'string'
+        ? { defaultEffort: reasoningRaw['defaultEffort'] as string }
+        : {},
+      canDisableThinking: reasoningRaw['canDisableThinking'] === true,
+    },
+    billing: {
+      ...credits === undefined || credits === '' ? {} : { credits },
+      free: credits !== undefined && /^x?0(?:\.0+)?$/iu.test(credits),
+    },
+  }
+}
+
+/**
+ * 拉取该账号的模型目录。
+ *
+ * 国际版与国内版路径相同，差异只在 User-Agent：国内版用 CLI 形态拿 CLI 名单，
+ * 国际版用 `WorkBuddyAI/<v>`（无空格，带空格会被拒）。
+ *
+ * @param credential - 目标凭据。
+ * @returns 模型列表；失败时抛错。
+ */
+export async function fetchCatalog(credential: WorkBuddyCredential): Promise<UpstreamModel[]> {
+  const variant = variantOfCredential(credential)
+  const url = `${chatBase(credential)}/v3/config`
+  const headers: Record<string, string> = {
+    ...commonHeaders(credential),
+    'Authorization': `Bearer ${credential.accessToken}`,
+  }
+  if (variant.region === 'global') {
+    headers['User-Agent'] = `WorkBuddyAI/${variant.defaultClientVersion}`
+    headers['X-Requested-With'] = 'XMLHttpRequest'
+    headers['X-Product'] = 'SaaS'
+  } else {
+    headers['User-Agent'] = 'CLI/2.63.2 CodeBuddy/2.63.2'
+    delete headers['X-Requested-With']
+  }
+
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(JSON_TIMEOUT_MS) })
+  const text = await response.text()
+  if (!response.ok) {
+    const kind = classifyUpstreamError(response.status, text)
+    const detail = extractDisplayErrorMessage(text) ?? `HTTP ${response.status}`
+    throw new Error(`目录拉取失败（${kind}）：${detail}`)
+  }
+  let document: unknown
+  try {
+    document = JSON.parse(text)
+  } catch {
+    throw new Error('目录响应不是合法 JSON')
+  }
+  const root = document as Record<string, unknown>
+  const data = typeof root['data'] === 'object' && root['data'] !== null
+    ? root['data'] as Record<string, unknown>
+    : root
+  const agents = Array.isArray(data['agents']) ? data['agents'] as Record<string, unknown>[] : []
+  const cli = agents.find(agent => agent['name'] === 'cli')
+  const ids = cli !== undefined && Array.isArray(cli['models'])
+    ? cli['models'].filter((id): id is string => typeof id === 'string' && id !== '')
+    : []
+  if (ids.length === 0) throw new Error('目录里没有 cli 模型名单')
+
+  // `agents[cli].models` 只是 id 列表，元数据在兄弟字段 `data.models` 里。
+  const rows = Array.isArray(data['models']) ? data['models'] as Record<string, unknown>[] : []
+  const byId = new Map<string, Record<string, unknown>>()
+  for (const row of rows) {
+    const id = row['id']
+    if (typeof id === 'string' && id !== '') byId.set(id, row)
+  }
+
+  // 名单顺序即上游意图顺序；元数据缺失的行跳过（缺字段的模型选了必然报错）。
+  const out: UpstreamModel[] = []
+  for (const id of ids) {
+    const row = byId.get(id)
+    if (row === undefined) continue
+    const model = toUpstreamModel(row)
+    if (model !== undefined) out.push(model)
+  }
+  return out
+}
+
+/** 计费接口专用头：不含 Origin / Referer / User-Agent。 */
+function billingHeaders(credential: WorkBuddyCredential): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${credential.accessToken}`,
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
+  }
+  if (credential.uid !== '') headers['X-User-Id'] = credential.uid
+  if (credential.enterpriseId !== '') {
+    headers['X-Enterprise-Id'] = credential.enterpriseId
+    headers['X-Tenant-Id'] = credential.enterpriseId
+  }
+  if (credential.domain !== '') headers['X-Domain'] = credential.domain
+  return headers
+}
+
+/** 上游统一信封：`{ code, msg, data }`。 */
+interface Envelope {
+  code: number
+  msg: string
+  data: unknown
+}
+
+/** 读取并解包上游响应。 */
+async function readEnvelope(response: Response, what: string): Promise<Envelope> {
+  const text = await response.text()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error(`${what}：上游返回非 JSON（HTTP ${response.status}）`)
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${what}：上游返回了非预期的文档（HTTP ${response.status}）`)
+  }
+  const document = parsed as Record<string, unknown>
+  return {
+    code: typeof document['code'] === 'number' ? document['code'] : 0,
+    msg: typeof document['msg'] === 'string' ? document['msg'] : '',
+    data: document['data'],
+  }
+}
+
+/** 本地时间格式化 `YYYY-MM-DD HH:mm:ss`，计费接口要求。 */
+function formatLocalTime(date: Date): string {
+  const pad = (n: number, width = 2): string => String(n).padStart(width, '0')
+  const day = `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  return `${day} ${time}`
+}
+
+/**
+ * 读取账号积分。
+ *
+ * 企业额度只有**国内版**有专用接口；国际版即使带 enterpriseId 也走个人套餐接口
+ * （上游未提供对应企业计费）。读不到一律抛错，绝不把「没读懂」显示成 0。
+ *
+ * @param credential - 目标凭据。
+ * @returns 积分快照。
+ */
+export async function fetchCredits(credential: WorkBuddyCredential): Promise<CreditSnapshot> {
+  if (regionOf(credential.domain) === 'cn' && credential.enterpriseId !== '') {
+    return await fetchEnterpriseCredits(credential)
+  }
+
+  const now = new Date()
+  const response = await fetch(`${billingBase(credential)}/v2/billing/meter/get-user-resource`, {
+    method: 'POST',
+    headers: billingHeaders(credential),
+    body: JSON.stringify({
+      PageNumber: 1,
+      PageSize: 100,
+      ProductCode: 'p_tcaca',
+      Status: [0, 3],
+      // 上游要求带套餐到期时间范围；漏掉会拿不到任何套餐。
+      PackageEndTimeRangeBegin: formatLocalTime(now),
+      PackageEndTimeRangeEnd: formatLocalTime(new Date(now.getTime() + 365 * 101 * 24 * 3600 * 1000)),
+    }),
+    signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+  })
+  const envelope = await readEnvelope(response, '积分读取失败')
+  if (!response.ok) {
+    const kind = classifyUpstreamError(response.status, JSON.stringify(envelope))
+    throw new Error(`积分读取失败（${kind}）：${envelope.msg || `HTTP ${response.status}`}`)
+  }
+  if (envelope.code !== 0) {
+    throw new Error(`积分读取失败（code ${envelope.code}）：${envelope.msg || '上游未说明原因'}`)
+  }
+  return parseCredits(envelope.data, false)
+}
+
+/** 国内版企业额度：单个周期额度，不是套餐清单。 */
+async function fetchEnterpriseCredits(credential: WorkBuddyCredential): Promise<CreditSnapshot> {
+  const response = await fetch(`${billingBase(credential)}/v2/billing/meter/get-enterprise-user-usage`, {
+    method: 'POST',
+    headers: billingHeaders(credential),
+    body: '{}',
+    signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+  })
+  const envelope = await readEnvelope(response, '企业积分读取失败')
+  if (!response.ok) {
+    const kind = classifyUpstreamError(response.status, JSON.stringify(envelope))
+    throw new Error(`企业积分读取失败（${kind}）：${envelope.msg || `HTTP ${response.status}`}`)
+  }
+  if (envelope.code !== 0) {
+    throw new Error(`企业积分读取失败（code ${envelope.code}）：${envelope.msg || '上游未说明原因'}`)
+  }
+  return parseCredits(envelope.data, true)
+}
+
+/** 把上游计费响应解析成积分快照。 */
+export function parseCredits(document: unknown, enterprise: boolean): CreditSnapshot {
+  const root = typeof document === 'object' && document !== null ? document as Record<string, unknown> : {}
+
+  if (enterprise) {
+    // 企业口径：limitNum / credit 成对出现，-1 表示不限量。
+    // 两个官方调用点的字段拼写不一致，两种都接受。
+    const pick = (...keys: string[]): number => {
+      for (const key of keys) {
+        const value = Number(root[key])
+        if (Number.isFinite(value)) return value
+      }
+      return Number.NaN
+    }
+    const limit = pick('limitNum', 'limit_num')
+    const used = pick('credit', 'used_num')
+    if (!Number.isFinite(limit) && !Number.isFinite(used)) {
+      throw new Error('企业积分响应缺少可识别字段（limitNum/limit_num 与 credit/used_num）')
+    }
+    const unlimited = limit === -1
+    const remaining = unlimited || !Number.isFinite(limit) || !Number.isFinite(used)
+      ? undefined
+      : Math.max(0, limit - used)
+    return {
+      ...unlimited || !Number.isFinite(limit) ? {} : { total: limit },
+      ...remaining === undefined ? {} : { remaining },
+      packages: [{
+        name: '企业额度',
+        ...unlimited || !Number.isFinite(limit) ? {} : { size: limit },
+        ...remaining === undefined ? {} : { remain: remaining },
+      }],
+    }
+  }
+
+  // 个人口径：data.Response.Data.Accounts[]
+  const wrapper = typeof root['Response'] === 'object' && root['Response'] !== null
+    ? root['Response'] as Record<string, unknown>
+    : root
+  const inner = typeof wrapper['Data'] === 'object' && wrapper['Data'] !== null
+    ? wrapper['Data'] as Record<string, unknown>
+    : {}
+  const rows = Array.isArray(inner['Accounts']) ? inner['Accounts'] as unknown[] : []
+
+  const num = (source: Record<string, unknown>, key: string): number =>
+    typeof source[key] === 'number' ? source[key] as number : 0
+
+  let remaining = 0
+  let total = 0
+  const packages: CreditSnapshot['packages'] = []
+  for (const raw of rows) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const account = raw as Record<string, unknown>
+    const size = num(account, 'CycleCapacitySize')
+    const cycleRemain = num(account, 'CycleCapacityRemain')
+    const cycleUsed = num(account, 'CycleCapacityUsed')
+    const capacityRemain = num(account, 'CapacityRemain')
+    // 有周期额度时以周期余量为准；否则回落到总余量。
+    const remain = Math.max(0, size > 0 || cycleRemain > 0 || cycleUsed > 0 ? cycleRemain : capacityRemain)
+    const packageSize = size > 0 ? size : num(account, 'CapacitySize')
+    remaining += remain
+    total += packageSize
+    packages.push({
+      name: typeof account['PackageName'] === 'string' ? account['PackageName'] : '(未命名)',
+      remain,
+      size: packageSize,
+    })
+  }
+  return { remaining, total, packages }
+}
+
+/** 刷新 access token。 */
+export async function refreshAccessToken(
+  credential: WorkBuddyCredential,
+): Promise<{ accessToken: string; refreshToken?: string; expiresInSec?: number; domain?: string }> {
+  const url = `${chatBase(credential)}/v2/plugin/auth/token/refresh`
+  const headers: Record<string, string> = {
+    ...commonHeaders(credential),
+    'X-Refresh-Token': credential.refreshToken,
+    'X-Auth-Refresh-Source': 'workbuddy',
+  }
+  if (credential.enterpriseId !== '') headers['X-Enterprise-Id'] = credential.enterpriseId
+
+  const response = await fetch(url, { method: 'POST', headers, signal: AbortSignal.timeout(JSON_TIMEOUT_MS) })
+  const text = await response.text()
+  if (!response.ok) throw new Error(`刷新 token 失败（HTTP ${response.status}）：${text.slice(0, 200)}`)
+  let document: unknown
+  try {
+    document = JSON.parse(text)
+  } catch {
+    throw new Error('刷新响应不是合法 JSON')
+  }
+  const root = document as Record<string, unknown>
+  const data = typeof root['data'] === 'object' && root['data'] !== null
+    ? root['data'] as Record<string, unknown>
+    : root
+  const accessToken = typeof data['accessToken'] === 'string' ? data['accessToken'] : ''
+  if (accessToken === '') throw new Error('刷新响应里没有 accessToken')
+  return {
+    accessToken,
+    ...typeof data['refreshToken'] === 'string' && data['refreshToken'] !== ''
+      ? { refreshToken: data['refreshToken'] }
+      : {},
+    ...Number.isFinite(Number(data['expiresIn'])) ? { expiresInSec: Number(data['expiresIn']) } : {},
+    ...typeof data['domain'] === 'string' && data['domain'] !== '' ? { domain: data['domain'] } : {},
+  }
+}

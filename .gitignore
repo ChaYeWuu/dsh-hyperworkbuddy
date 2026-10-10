@@ -1,0 +1,13 @@
+node_modules/
+*.log
+.DS_Store
+
+# 本地开发用，不随插件分发
+tests/
+package-lock.json
+
+# 调研产物
+.probe/
+.probe020/
+.research/
+workbuddy-upstream-protocol-spec.md

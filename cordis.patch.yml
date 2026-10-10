@@ -1,0 +1,6 @@
+# Register the HyperWorkBuddy provider without touching the profile's default
+# model. Accounts are discovered from the WorkBuddy desktop apps' own sign-in
+# files; more can be added from the plugin's own settings panel.
+- insert:
+    - id: llm-hyperworkbuddy
+      name: dsh-hyperworkbuddy
