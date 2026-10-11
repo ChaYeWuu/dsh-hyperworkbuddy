@@ -548,29 +548,32 @@ export class AccountPool {
   }
 
   /**
-   * 强制刷新该账号的令牌，再做一次最小可用性探测。
+   * 测试该账号当前是否可用。
    *
-   * 令牌刷新失败不致命：refresh token 可能已失效，而 access token 仍在有效期内，
-   * 所以照常探测，结论以探测为准。
+   * 顺带续一次令牌：refresh token 可能已失效，而 access token 仍在有效期内，
+   * 所以续期失败不致命，结论以探测为准。
    */
-  async refreshAccount(account: string, variantId: string): Promise<AccountProbeResult> {
+  async testAccount(account: string, variantId: string): Promise<AccountProbeResult> {
     const target = this.accounts.find(a => a.account === account && a.variantId === variantId)
     if (target === undefined) throw new Error('账号不存在')
+    let renewError = ''
     if (target.refreshToken !== '') {
       try {
         await this.applyRefresh(account, variantId, await refreshAccessToken(toCredential(target)))
       } catch (error: unknown) {
-        this.noteFailure(account, variantId, `刷新 token 失败：${String(error)}`, false)
+        renewError = String(error)
       }
     }
-    const result = await probeAccount(toCredential(target), target.models)
+    const result = await probeAccount(toCredential(target))
     if (result.ok) {
       this.noteSuccess(account, variantId)
       await this.persist()
-    } else {
-      this.noteFailure(account, variantId, `${result.kind}: ${result.message}`, PROBE_RETRYABLE_KINDS.has(result.kind))
+      return result
     }
-    return result
+    // 令牌没续上往往就是探测失败的原因，一并带上。
+    const message = renewError === '' ? `${result.kind}: ${result.message}` : `${result.kind}: ${result.message}（令牌续期也失败：${renewError}）`
+    this.noteFailure(account, variantId, message, PROBE_RETRYABLE_KINDS.has(result.kind))
+    return { ...result, message }
   }
 
   /**

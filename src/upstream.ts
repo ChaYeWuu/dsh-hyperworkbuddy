@@ -914,68 +914,43 @@ export interface AccountProbeResult {
   ok: boolean
   /** 上游返回的 HTTP 状态码；没连上时为 0。 */
   status: number
-  /** 探测用的模型 id；目录为空时为空串。 */
+  /** 探测用的模型 id。 */
   model: string
-  /** 探测用的推理档位；模型未声明档位时为空串。 */
-  effort: string
   /** 失败类别；通过时为空串。 */
   kind: string
   /** 面向用户的说明。 */
   message: string
 }
 
-/** 探测优先用这个模型：两区目录里都有，且是最便宜的一档。 */
+/** 探测固定用这个模型：两区目录里都有，且是最便宜的一档。 */
 const PROBE_MODEL_ID = 'deepseek-v4.1-flash'
-
-/** 挑探测模型：优先 deepseek-v4.1-flash，其次免费模型，再退回目录第一条。 */
-function probeModel(models: UpstreamModel[]): UpstreamModel | undefined {
-  return models.find(candidate => candidate.id === PROBE_MODEL_ID)
-    ?? models.find(candidate => candidate.billing.free)
-    ?? models[0]
-}
-
-/** 探测档位固定取 low；模型没声明就退回它声明的最低档，都没声明则省略该字段走上游默认。 */
-function probeEffort(model: UpstreamModel): string {
-  const declared = model.reasoning.supportedEfforts ?? []
-  if (declared.length === 0) return ''
-  if (declared.includes('low')) return 'low'
-  return EFFORT_VALUES.find(effort => declared.includes(effort)) ?? ''
-}
 
 /**
  * 用一条最小请求验证凭据当前可用。
  *
- * 优先用 deepseek-v4.1-flash 的 low 档，`max_tokens: 1`，把一次探测的开销压到最小。
- * 上游接了请求就立刻断开，不读正文。
+ * 不看目录、不带推理档位：`max_tokens: 1` 把开销压到最小，上游接了请求就立刻
+ * 断开，不读正文。
  *
  * @param credential - 目标凭据。
- * @param models - 该账号缓存里的模型目录。
  * @param signal - 取消信号。
  * @returns 探测结论。
  */
 export async function probeAccount(
   credential: WorkBuddyCredential,
-  models: UpstreamModel[],
   signal?: AbortSignal,
 ): Promise<AccountProbeResult> {
-  const model = probeModel(models)
-  if (model === undefined) {
-    return { ok: false, status: 0, model: '', effort: '', kind: 'client', message: '目录里没有可用的模型，请先刷新模型' }
-  }
-  const effort = probeEffort(model)
   const body = JSON.stringify({
-    model: model.id,
+    model: PROBE_MODEL_ID,
     stream: true,
     messages: [{ role: 'user', content: 'ping' }],
     max_tokens: 1,
-    ...effort === '' ? {} : { reasoning_effort: effort },
   })
   const result = await chatCompletions(credential, body, signal)
   if (result.ok) {
     try { await result.response.body?.cancel() } catch { /* 忽略 */ }
-    return { ok: true, status: result.response.status, model: model.id, effort, kind: '', message: '凭据可用' }
+    return { ok: true, status: result.response.status, model: PROBE_MODEL_ID, kind: '', message: '凭据可用' }
   }
-  return { ok: false, status: result.status, model: model.id, effort, kind: result.kind, message: result.message }
+  return { ok: false, status: result.status, model: PROBE_MODEL_ID, kind: result.kind, message: result.message }
 }
 
 /** 刷新 access token。 */

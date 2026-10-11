@@ -91,9 +91,9 @@ const zh = {
   disable: '停用',
   refreshCredits: '刷新积分',
   refreshCatalog: '刷新模型',
-  refreshAccount: '刷新账号',
-  refreshAccountDone: '凭据可用 · OK · {status}',
-  refreshAccountHint: '刷新令牌并用一条最小请求验证账号状态',
+  testAccount: '测试账号',
+  testAccountDone: '凭据可用 · OK · {status}',
+  testAccountHint: '发一条最小请求验证账号是否可用',
   sourceDesktop: '桌面 App',
   sourceManual: '导入',
   statusReady: '可用',
@@ -224,9 +224,9 @@ const en: typeof zh = {
   disable: 'Disable',
   refreshCredits: 'Refresh credits',
   refreshCatalog: 'Refresh models',
-  refreshAccount: 'Refresh account',
-  refreshAccountDone: 'Credentials work · OK · {status}',
-  refreshAccountHint: 'Refresh the token and verify the account with one minimal request',
+  testAccount: 'Test account',
+  testAccountDone: 'Credentials work · OK · {status}',
+  testAccountHint: 'Verify the account with one minimal request',
   sourceDesktop: 'Desktop app',
   sourceManual: 'Imported',
   statusReady: 'Ready',
@@ -705,13 +705,13 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
           actionButton(`catalog:${key}`, t('refreshCatalog'), () => {
             void run(`catalog:${key}`, '/account/catalog', { account: account.account, variantId: account.variantId })
           }, t('working')),
-          actionButton(`refreshAccount:${key}`, t('refreshAccount'), () => {
-            const busyKey = `refreshAccount:${key}`
+          actionButton(`testAccount:${key}`, t('testAccount'), () => {
+            const busyKey = `testAccount:${key}`
             setAccountNotice(prev => ({ ...prev, [key]: { text: '', ok: true } }))
             setBusy(busyKey)
             void (async () => {
               try {
-                const raw = await postPayload('/account/refresh', { account: account.account, variantId: account.variantId })
+                const raw = await postPayload('/account/test', { account: account.account, variantId: account.variantId })
                 if (raw.document !== undefined) setDoc(raw.document)
                 const ok = raw.ok === true
                 setAccountNotice(prev => ({
@@ -719,15 +719,15 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                   [key]: {
                     ok,
                     text: ok
-                      ? t('refreshAccountDone', {
+                      ? t('testAccountDone', {
                         status: typeof raw['status'] === 'number' ? String(raw['status']) : '200',
                       })
-                      : `${t('refreshAccount')}: ${typeof raw['error'] === 'string' ? raw['error'] : t('refreshAccountHint')}`,
+                      : `${t('testAccount')}: ${typeof raw['error'] === 'string' ? raw['error'] : t('testAccountHint')}`,
                   },
                 }))
                 setError('')
               } catch (err) {
-                setAccountNotice(prev => ({ ...prev, [key]: { ok: false, text: `${t('refreshAccount')}: ${String(err)}` } }))
+                setAccountNotice(prev => ({ ...prev, [key]: { ok: false, text: `${t('testAccount')}: ${String(err)}` } }))
               } finally {
                 setBusy('')
               }

@@ -1029,12 +1029,12 @@ export function apply(ctx: Context, config: Config): void {
         }
       })
 
-      mount(`${ROUTE_PREFIX}/account/refresh`, async (req, res) => {
+      mount(`${ROUTE_PREFIX}/account/test`, async (req, res) => {
         const body = await readJsonBody(req)
         const account = typeof body['account'] === 'string' ? body['account'] : ''
         const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
         try {
-          const result = await pool.refreshAccount(account, variantId)
+          const result = await pool.testAccount(account, variantId)
           invalidate()
           json(res, 200, { ok: result.ok, ...result, ...result.ok ? {} : { error: result.message }, document: panelDocument() })
         } catch (error: unknown) {
