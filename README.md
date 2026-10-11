@@ -34,31 +34,83 @@
 
 前置：已安装并登录 WorkBuddy 桌面 App（国内版或国际版均可）。插件复用 App 的登录状态，**零配置**即可用。
 
-```sh
-# 在 DSH profile 目录下
-cd ~/.dsh/profiles/desktop
-npm install dsh-hyperworkbuddy
+> 本包**没有发布到 npm**，`npm install dsh-hyperworkbuddy` 会以 404 结束。
+> 请用下面的仓库地址安装。
+
+### 方式一：桌面 App 的插件页（推荐）
+
+1. 打开 DSH 侧边栏的 **插件** 页 → **添加插件**；
+2. 「包名或地址」填仓库地址：
+
+   ```
+   https://github.com/ChaYeWuu/dsh-hyperworkbuddy
+   ```
+
+3. 点「安装」，装完 **完全退出并重启 DSH**（新增 bundle 不会被热加载）。
+
+插件页会自己把 `dsh-hyperworkbuddy` 写进 profile 的 `dsh.profile.bundles`，不需要手工改
+`package.json`。仓库里带着构建产物 `lib/`，从 GitHub 直接装不用先构建。
+
+填 GitHub 地址时插件页会先做一次连通性预检（默认 5 秒超时），拉取完成后才校验内核版本
+兼容性——所以「无法访问 GitHub」多半就是预检超时，换网络或挂代理后重试。
+
+### 方式二：交给 Agent
+
+把下面这段原样发给能读写本机的 AI 助手：
+
+```text
+请帮我在本机安装 DSH 插件 dsh-hyperworkbuddy：
+1. 先确认 DSH 桌面 App 的内置核心版本（看 App 的「关于」页，不要用独立 CLI 的
+   dsh --version 代替，它通常比桌面内核旧）；
+2. 在 DSH 侧边栏「插件」页 →「添加插件」里填入
+   https://github.com/ChaYeWuu/dsh-hyperworkbuddy 并安装；
+3. 安装完成后完全退出并重启 DSH；
+4. 确认设置左侧导航出现「WorkBuddy」一级菜单，模型选择器里出现
+   WorkBuddy 与 WorkBuddy AI 两个分组。
+安装失败时把插件页上的完整报错贴回来。
 ```
 
-然后在 `~/.dsh/profiles/desktop/package.json` 的 `dsh.profile.bundles` 数组里加上 `"dsh-hyperworkbuddy"`：
+### 方式三：手动改 profile（插件页不可用时）
 
-```json
-{
-  "dsh": {
-    "profile": {
-      "bundles": [
-        "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-web-app",
-        "dsh-hyperworkbuddy"
-      ]
-    }
-  }
-}
-```
+`desktop` profile 由桌面 App 独占管理，`dsh plugin --profile desktop …` 会被 CLI 直接拒绝
+（`profile "desktop" is managed exclusively by the Electron application`），所以只能改文件：
 
-**完全退出并重启 DSH**（新增 bundle 不会被热加载）。
+1. **完全退出 DSH**，并备份 `~/.dsh/profiles/desktop/package.json` 与同目录的 `pnpm-lock.yaml`；
+2. 在 `package.json` 的 `dependencies` 里加一行，并把包名追加进 `dsh.profile.bundles`：
 
-从源码安装：
+   ```json
+   {
+     "dependencies": {
+       "dsh-hyperworkbuddy": "github:ChaYeWuu/dsh-hyperworkbuddy"
+     },
+     "dsh": {
+       "profile": {
+         "bundles": [
+           "@deepseek-ai/dsh-base",
+           "@deepseek-ai/dsh-web-app",
+           "dsh-hyperworkbuddy"
+         ]
+       }
+     }
+   }
+   ```
+
+3. 在 profile 目录里用 **pnpm** 安装（该目录有 `pnpm-workspace.yaml`，`npm` 不认）：
+
+   ```sh
+   cd ~/.dsh/profiles/desktop
+   pnpm install
+   ```
+
+4. 重启 DSH。桌面 App 不捆绑 pnpm，用系统里已装的那个即可；版本过旧会在 pnpm store
+   上报错，升级 pnpm 后重试。
+
+### 版本要求
+
+插件要求 DSH 内核 `^0.2.0-rc.1`（桌面版 `0.2.0-rc.2` 满足）。内核不兼容时插件页会
+拒绝安装并列出所需版本与当前内核版本；按 GitHub 地址安装时这一步在拉取完成之后。
+
+想自己改源码：
 
 ```sh
 git clone https://github.com/ChaYeWuu/dsh-hyperworkbuddy.git
@@ -247,6 +299,9 @@ export OPENAI_BASE_URL="http://127.0.0.1:8792/v1"
 
 | 现象 | 原因与处理 |
 |---|---|
+| 插件页报「无法访问 GitHub」 | 预检超时（默认 5 秒），换网络或挂代理后重试 |
+| 插件页报「不兼容」 | 内核版本不在 `^0.2.0-rc.1` 内，升级 DSH 桌面 App |
+| `npm install dsh-hyperworkbuddy` 报 404 | 该包没发布到 npm，改用仓库地址安装（见「安装」） |
 | 设置里没有 WorkBuddy | 没重启，或 bundle 未加进 `dsh.profile.bundles` |
 | `providerRegistered: false` | 看该分区的 `providerError` |
 | 模型列表为空 | 面板里点「重新扫描并刷新」；确认对应桌面 App 已登录 |
@@ -293,8 +348,8 @@ npm run build       # esbuild 打包 lib/index.js（host）与 lib/client.js（�
 npm run typecheck   # 类型检查
 ```
 
-仓库只包含插件本身与它的源码：`lib/` 是构建产物（从 GitHub 直接安装需要它），
-`src/` 是源码。测试与 lockfile 属本地开发用，不进仓库。
+仓库只包含插件本身与它的源码：`lib/` 是构建产物（随仓库提交，从 GitHub 直接安装的
+用户因此不必先构建），`src/` 是源码。测试与 lockfile 属本地开发用，不进仓库。
 
 源码结构：
 

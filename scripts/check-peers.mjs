@@ -1,41 +1,58 @@
-// 检查 peerDependencies 是否会静默排除 harness 的预发布版本。
+// 检查 peerDependencies 是否放行 harness 的预发布版本。
 //
-// node-semver 只有当范围里某个比较符与该版本的 major.minor.patch 元组完全一致、
-// 且自身带预发布标签时，才放行预发布版本。宽范围如 `>=0.0.1-rc.1 <0.2.0` 匹配不到
-// `0.1.0-rc.6`，用户会遇到 ERESOLVE。
+// 内核的判定是 dsh-app-boot 的 evaluatePluginCompatibility()：
+//   semver.satisfies(runtimeVersion, range, { includePrerelease: true })
+// 且只校验 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*`。这里的输入与选项都与它对齐，
+// 否则本地 PASS 而安装时被拒。
 //
-// 只对按预发布节奏发版的 dsh-* 内核包做这项检查：cordis / schemastery 这类
-// 稳定版依赖本来就不带预发布标签，拿内核版本去套它们只会得到无意义的失败。
+// includePrerelease 下预发布只在 major.minor.patch 元组相同的比较符里放行：
+// `0.2.0-rc.2` 这类精确写法只认那一个版本，宿主换一个 rc 就装不上。
 import { readFileSync } from 'node:fs'
 import * as semver from 'semver'
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const peers = pkg.peerDependencies ?? {}
 
-// 内核真实存在过的预发布版本，用于验证范围是否放行。
-const HARNESS_PRERELEASES = [
-  '0.1.5-rc.1', '0.1.6-alpha.2', '0.1.7-rc.2', '0.2.0-rc.1', '0.2.0-rc.2',
+// 同一条发布线上已发布或即将出现的版本，范围必须全部放行。
+const SUPPORTED = [
+  '0.2.0-rc.1', '0.2.0-rc.2', '0.2.0-rc.3', '0.2.0',
+  '0.2.1-alpha.1', '0.2.1-alpha.2', '0.2.1-rc.1', '0.2.1', '0.2.2-alpha.1',
 ]
+// 已越出支持线：范围必须拦住，否则等于没写上限。
+const REJECTED = ['0.1.7-rc.2', '0.3.0-rc.1', '0.3.0']
 
-/** 该依赖是否按预发布节奏发版（只有这些包需要预发布分支）。 */
-function isPrereleaseTracked(name) {
-  return /^@deepseek-ai\/dsh-/.test(name)
+/** 该依赖是否与内核同一条发布线（只有这些包需要预发布分支）。 */
+function isHarnessPackage(name) {
+  return /^@deepseek-ai\/dsh(?:-|$)/.test(name)
+}
+
+/** 按内核语义判定，非法范围一律视为不匹配。 */
+function matches(version, range) {
+  try { return semver.satisfies(version, range, { includePrerelease: true }) } catch { return false }
 }
 
 let problems = 0
 for (const [name, range] of Object.entries(peers)) {
-  if (!isPrereleaseTracked(name)) {
-    console.log(`  SKIP  ${name}  ${range}（稳定版依赖，不涉及预发布）`)
+  if (!isHarnessPackage(name)) {
+    console.log(`  SKIP  ${name}  ${range}（不在内核发布线上，内核不校验）`)
     continue
   }
-  const matched = HARNESS_PRERELEASES.filter(v => {
-    try { return semver.satisfies(v, range, { includePrerelease: false }) } catch { return false }
-  })
-  // 带预发布标签的比较符即视为作者已显式处理
-  const explicit = /-(rc|alpha|beta|next)\./i.test(range)
-  const ok = matched.length > 0 || explicit
+  const missing = SUPPORTED.filter(v => !matches(v, range))
+  const leaked = REJECTED.filter(v => matches(v, range))
+  const ok = missing.length === 0 && leaked.length === 0
   if (!ok) problems += 1
-  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}  ${range}  -> 放行 [${matched.join(', ') || '无'}]${explicit ? '（显式预发布分支）' : ''}`)
+  const detail = [
+    missing.length > 0 ? `漏掉 [${missing.join(', ')}]` : '',
+    leaked.length > 0 ? `误放行 [${leaked.join(', ')}]` : '',
+  ].filter(Boolean).join('；')
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}  ${range}${ok ? '' : `  -> ${detail}`}`)
+}
+
+const engines = pkg.dsh?.engines?.dsh
+if (typeof engines === 'string') {
+  const ok = SUPPORTED.every(v => matches(v, engines)) && REJECTED.every(v => !matches(v, engines))
+  if (!ok) problems += 1
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  dsh.engines.dsh  ${engines}`)
 }
 
 console.log(`\n  问题项: ${problems}`)
