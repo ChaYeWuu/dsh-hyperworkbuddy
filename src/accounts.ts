@@ -564,7 +564,8 @@ export class AccountPool {
         renewError = String(error)
       }
     }
-    const result = await probeAccount(toCredential(target))
+    // 目录里的模型只是备用候选：首选模型在本地目录里查不到不代表上游没有。
+    const result = await probeAccount(toCredential(target), target.models.map(model => model.id))
     if (result.ok) {
       this.noteSuccess(account, variantId)
       await this.persist()

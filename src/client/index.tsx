@@ -394,11 +394,40 @@ interface PanelInjected {
   t: (key: keyof typeof zh, vars?: Record<string, string | number>) => string
 }
 
+/**
+ * 读出响应体并解析成 JSON 对象。
+ *
+ * 不能直接用 `response.json()`：宿主没重启时新路由没注册，返回的是 405 空体，
+ * 那样只会抛一句 `Failed to execute 'json' on 'Response'`，看不出发生了什么。
+ *
+ * @param response - 待解析的响应。
+ * @returns 解析出的对象。
+ */
+async function readJsonResponse(response: Response): Promise<Record<string, unknown>> {
+  const text = await response.text()
+  if (text.trim() === '') {
+    throw new Error(`HTTP ${response.status}：响应为空，DSH 可能还在运行旧版插件，请完全退出并重启 DSH`)
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error(`HTTP ${response.status}：响应不是 JSON（${text.slice(0, 120)}）`)
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`HTTP ${response.status}：响应不是 JSON 对象（${text.slice(0, 120)}）`)
+  }
+  return parsed as Record<string, unknown>
+}
+
 /** 拉取状态文档。 */
 async function fetchStatus(): Promise<PanelDocument> {
   const response = await fetch(`${ROUTE_PREFIX}/status`, { headers: { 'Accept': 'application/json' } })
-  if (!response.ok) throw new Error(`HTTP ${response.status}`)
-  return await response.json() as PanelDocument
+  const payload = await readJsonResponse(response)
+  if (!response.ok) {
+    throw new Error(typeof payload['error'] === 'string' ? payload['error'] : `HTTP ${response.status}`)
+  }
+  return payload as unknown as PanelDocument
 }
 
 /**
@@ -418,11 +447,11 @@ async function postPayload(path: string, body: unknown): Promise<Record<string, 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  const payload = await response.json() as Record<string, unknown>
+  const payload = await readJsonResponse(response)
   if (!response.ok && payload['document'] === undefined) {
     throw new Error(typeof payload['error'] === 'string' ? payload['error'] : `HTTP ${response.status}`)
   }
-  return payload
+  return payload as Record<string, unknown> & { document?: PanelDocument }
 }
 
 /** 调用管理接口并只取新状态文档；回执字段请改用 postPayload。 */

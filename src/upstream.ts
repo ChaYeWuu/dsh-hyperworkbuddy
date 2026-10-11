@@ -23,7 +23,14 @@ export type UpstreamErrorKind =
 /** chat 结果：成功带原始响应，失败带分类与可展示文案。 */
 export type ChatResult =
   | { ok: true; response: Response }
-  | { ok: false; status: number; kind: UpstreamErrorKind; message: string }
+  | {
+    ok: false
+    status: number
+    kind: UpstreamErrorKind
+    message: string
+    /** 失败原因就是「这个模型不存在」；调用方据此决定要不要换模型重试。 */
+    modelMissing: boolean
+  }
 
 /** 一条模型目录记录。 */
 export interface UpstreamModel {
@@ -70,6 +77,15 @@ const HARD_CREDIT_MARKERS = [
 ] as const
 
 const SESSION_DEAD_MARKERS = ['Offline user session not found', '12153'] as const
+
+/**
+ * 上游「这个模型不存在」的标识。
+ *
+ * 两区实测都是 HTTP 400 + `code: 11102` + `msg: model [...] service info not found`，
+ * 而展示文案已被本地化成「当前模型不可用」，所以只能认原始 body。
+ */
+const MODEL_MISSING_CODE = '11102'
+const MODEL_MISSING_MARKER = 'service info not found'
 
 /** 上游错误体上限，避免异常大 body 吃内存。 */
 const ERROR_BODY_LIMIT = 4096
@@ -276,13 +292,20 @@ export async function chatCompletions(
       ...signal === undefined ? {} : { signal },
     })
   } catch (error: unknown) {
-    return { ok: false, status: 0, kind: 'server', message: `连接上游失败：${String(error)}` }
+    return { ok: false, status: 0, kind: 'server', message: `连接上游失败：${String(error)}`, modelMissing: false }
   }
   if (!response.ok) {
     const body = await readErrorBody(response)
     const kind = classifyUpstreamError(response.status, body)
     const detail = extractDisplayErrorMessage(body) ?? `上游返回 HTTP ${response.status}`
-    return { ok: false, status: response.status, kind, message: detail }
+    return {
+      ok: false,
+      status: response.status,
+      kind,
+      message: detail,
+      modelMissing: response.status === 400
+        && (body.includes(MODEL_MISSING_CODE) || body.includes(MODEL_MISSING_MARKER)),
+    }
   }
   return { ok: true, response }
 }
@@ -928,29 +951,46 @@ const PROBE_MODEL_ID = 'deepseek-v4.1-flash'
 /**
  * 用一条最小请求验证凭据当前可用。
  *
- * 不看目录、不带推理档位：`max_tokens: 1` 把开销压到最小，上游接了请求就立刻
- * 断开，不读正文。
+ * 固定先打 {@link PROBE_MODEL_ID}；只有上游明确回「这个模型不存在」时才按
+ * `fallbacks` 的顺序换下一个候选。限流、凭据失效、网络故障都如实返回，不换
+ * 模型——那会把真正的失败原因盖成一句「凭据可用」。
+ *
+ * 不带推理档位：`max_tokens: 1` 把开销压到最小，上游接了请求就立刻断开，不读正文。
  *
  * @param credential - 目标凭据。
+ * @param fallbacks - 备用模型 id；只在首选模型不存在时按序尝试。
  * @param signal - 取消信号。
  * @returns 探测结论。
  */
 export async function probeAccount(
   credential: WorkBuddyCredential,
+  fallbacks: readonly string[] = [],
   signal?: AbortSignal,
 ): Promise<AccountProbeResult> {
-  const body = JSON.stringify({
+  const candidates = [PROBE_MODEL_ID, ...fallbacks.filter(id => id !== '' && id !== PROBE_MODEL_ID)]
+  let result: AccountProbeResult = {
+    ok: false,
+    status: 0,
     model: PROBE_MODEL_ID,
-    stream: true,
-    messages: [{ role: 'user', content: 'ping' }],
-    max_tokens: 1,
-  })
-  const result = await chatCompletions(credential, body, signal)
-  if (result.ok) {
-    try { await result.response.body?.cancel() } catch { /* 忽略 */ }
-    return { ok: true, status: result.response.status, model: PROBE_MODEL_ID, kind: '', message: '凭据可用' }
+    kind: 'server',
+    message: '没有可用的探测模型',
   }
-  return { ok: false, status: result.status, model: PROBE_MODEL_ID, kind: result.kind, message: result.message }
+  for (const model of candidates) {
+    const body = JSON.stringify({
+      model,
+      stream: true,
+      messages: [{ role: 'user', content: 'ping' }],
+      max_tokens: 1,
+    })
+    const outcome = await chatCompletions(credential, body, signal)
+    if (outcome.ok) {
+      try { await outcome.response.body?.cancel() } catch { /* 忽略 */ }
+      return { ok: true, status: outcome.response.status, model, kind: '', message: '凭据可用' }
+    }
+    result = { ok: false, status: outcome.status, model, kind: outcome.kind, message: outcome.message }
+    if (!outcome.modelMissing) return result
+  }
+  return result
 }
 
 /** 刷新 access token。 */
