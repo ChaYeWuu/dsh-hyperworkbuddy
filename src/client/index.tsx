@@ -316,14 +316,17 @@ async function fetchStatus(): Promise<PanelDocument> {
   return await response.json() as PanelDocument
 }
 
-/** 调用一个返回新状态文档的管理接口，只取文档。 */
-async function postDocument(path: string, body: unknown): Promise<PanelDocument> {
-  const payload = await postPayload(path, body)
-  if (payload.document !== undefined) return payload.document
-  throw new Error(payload.error ?? '响应缺少 document')
-}
-
-/** 管理接口的完整响应：既有状态文档，也有接口自己的字段（如登录的 authUrl）。 */
+/**
+ * 调用一个返回新状态文档的管理接口。
+ *
+ * 返回的是**完整响应**，不只是 document：很多接口会在顶层带自己的回执行段
+ * （`catalogsOk`、`results`、`authUrl`、`accepted` …）。只取 document 会让
+ * 这些字段无声变成 undefined，界面上就会渲染出「undefined 个账号」这类文案。
+ *
+ * @param path - 相对 `ROUTE_PREFIX` 的路径。
+ * @param body - 请求体。
+ * @returns 完整响应，含可选的 `document`。
+ */
 async function postPayload(path: string, body: unknown): Promise<Record<string, unknown> & { document?: PanelDocument }> {
   const response = await fetch(`${ROUTE_PREFIX}${path}`, {
     method: 'POST',
@@ -335,6 +338,19 @@ async function postPayload(path: string, body: unknown): Promise<Record<string, 
     throw new Error(typeof payload['error'] === 'string' ? payload['error'] : `HTTP ${response.status}`)
   }
   return payload
+}
+
+/** 调用管理接口并只取新状态文档；回执字段请改用 postPayload。 */
+async function postDocument(path: string, body: unknown): Promise<PanelDocument> {
+  const payload = await postPayload(path, body)
+  if (payload.document !== undefined) return payload.document
+  throw new Error(typeof payload['error'] === 'string' ? payload['error'] : '响应缺少 document')
+}
+
+/** 从响应里读一个数字字段，缺失按 0 处理。 */
+function numField(payload: Record<string, unknown>, key: string): number {
+  const value = payload[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
 /** 在默认浏览器里打开一个外部链接。 */
@@ -637,11 +653,18 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                 setBusy(`checkin:${variant.id}`)
                 void (async () => {
                   try {
-                    const next = await postDocument('/variant/checkin', { variantId: variant.id })
-                    setDoc(next)
-                    const results = (next as unknown as { results?: { ok: boolean }[] }).results ?? []
+                    // 用 postPayload：results 是接口自己的字段，postDocument 只取
+                    // document，会把回执丢掉，界面上就会显示 undefined。
+                    const raw = await postPayload('/variant/checkin', { variantId: variant.id })
+                    if (raw.document !== undefined) setDoc(raw.document)
+                    const results = Array.isArray(raw['results'])
+                      ? (raw['results'] as { ok: boolean }[])
+                      : []
                     const okCount = results.filter(r => r.ok).length
-                    setNotice(t('checkinDone', { ok: okCount, total: results.length }))
+                    const failure = typeof raw['error'] === 'string' ? raw['error'] : ''
+                    setNotice(failure !== ''
+                      ? failure
+                      : t('checkinDone', { ok: okCount, total: results.length }))
                     setError('')
                   } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
                 })()
@@ -652,13 +675,12 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
               setBusy(`refreshVariant:${variant.id}`)
               void (async () => {
                 try {
-                  const next = await postDocument('/variant/refresh', { variantId: variant.id })
-                  setDoc(next)
-                  const r = next as unknown as { catalogsOk: number; catalogsFailed: number; creditsOk: number; creditsFailed: number }
+                  const raw = await postPayload('/variant/refresh', { variantId: variant.id })
+                  if (raw.document !== undefined) setDoc(raw.document)
                   setNotice(t('refreshDone', {
-                    ok: r.catalogsOk,
-                    failed: r.catalogsFailed,
-                    credits: r.creditsOk,
+                    ok: numField(raw, 'catalogsOk'),
+                    failed: numField(raw, 'catalogsFailed'),
+                    credits: numField(raw, 'creditsOk'),
                   }))
                   setError('')
                 } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
