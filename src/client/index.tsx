@@ -92,8 +92,7 @@ const zh = {
   refreshCredits: '刷新积分',
   refreshCatalog: '刷新模型',
   refreshAccount: '刷新账号',
-  refreshAccountDone: '凭据可用：{model}（档位 {effort}）',
-  refreshAccountNoEffort: '默认档',
+  refreshAccountDone: '凭据可用 · OK · {status}',
   refreshAccountHint: '刷新令牌并用一条最小请求验证账号状态',
   sourceDesktop: '桌面 App',
   sourceManual: '导入',
@@ -226,8 +225,7 @@ const en: typeof zh = {
   refreshCredits: 'Refresh credits',
   refreshCatalog: 'Refresh models',
   refreshAccount: 'Refresh account',
-  refreshAccountDone: 'Credentials work: {model} (effort {effort})',
-  refreshAccountNoEffort: 'default',
+  refreshAccountDone: 'Credentials work · OK · {status}',
   refreshAccountHint: 'Refresh the token and verify the account with one minimal request',
   sourceDesktop: 'Desktop app',
   sourceManual: 'Imported',
@@ -517,6 +515,7 @@ const S = {
   badgeInfo: { background: 'rgba(90,140,240,.15)', borderColor: 'rgba(90,140,240,.4)' },
   accountRow: { border: '1px solid var(--dsw-alias-border-l2, #3333)', borderRadius: '8px', padding: '10px 12px', marginBottom: '8px' },
   muted: { color: 'var(--dsw-alias-label-secondary, #888)', fontSize: '12px' },
+  ok: { color: '#3cb46e', fontSize: '12px' },
   error: { color: '#e05a5a', fontSize: '12px', wordBreak: 'break-all' as const },
   variantHead: {
     display: 'flex', alignItems: 'center', gap: '8px', paddingBottom: '8px', marginBottom: '10px',
@@ -721,8 +720,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                     ok,
                     text: ok
                       ? t('refreshAccountDone', {
-                        model: typeof raw['model'] === 'string' && raw['model'] !== '' ? raw['model'] : '—',
-                        effort: typeof raw['effort'] === 'string' && raw['effort'] !== '' ? raw['effort'] : t('refreshAccountNoEffort'),
+                        status: typeof raw['status'] === 'number' ? String(raw['status']) : '200',
                       })
                       : `${t('refreshAccount')}: ${typeof raw['error'] === 'string' ? raw['error'] : t('refreshAccountHint')}`,
                   },
@@ -747,7 +745,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
       ),
       accountNotice[key] === undefined || accountNotice[key].text === ''
         ? null
-        : h('div', { style: accountNotice[key].ok ? { ...S.muted, marginTop: '6px' } : { ...S.error, marginTop: '6px' } }, accountNotice[key].text),
+        : h('div', { style: accountNotice[key].ok ? { ...S.ok, marginTop: '6px' } : { ...S.error, marginTop: '6px' } }, accountNotice[key].text),
       h('div', { style: { ...S.row, marginTop: '6px', gap: '16px' } },
         h('span', { style: S.muted }, account.nickname === '' ? '—' : account.nickname),
         account.domain === '' ? null : h('span', { style: S.muted }, account.domain),

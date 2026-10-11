@@ -912,6 +912,8 @@ export async function probeEfforts(
 export interface AccountProbeResult {
   /** 上游接了这条请求。 */
   ok: boolean
+  /** 上游返回的 HTTP 状态码；没连上时为 0。 */
+  status: number
   /** 探测用的模型 id；目录为空时为空串。 */
   model: string
   /** 探测用的推理档位；模型未声明档位时为空串。 */
@@ -958,7 +960,7 @@ export async function probeAccount(
 ): Promise<AccountProbeResult> {
   const model = probeModel(models)
   if (model === undefined) {
-    return { ok: false, model: '', effort: '', kind: 'client', message: '目录里没有可用的模型，请先刷新模型' }
+    return { ok: false, status: 0, model: '', effort: '', kind: 'client', message: '目录里没有可用的模型，请先刷新模型' }
   }
   const effort = probeEffort(model)
   const body = JSON.stringify({
@@ -971,9 +973,9 @@ export async function probeAccount(
   const result = await chatCompletions(credential, body, signal)
   if (result.ok) {
     try { await result.response.body?.cancel() } catch { /* 忽略 */ }
-    return { ok: true, model: model.id, effort, kind: '', message: '凭据可用' }
+    return { ok: true, status: result.response.status, model: model.id, effort, kind: '', message: '凭据可用' }
   }
-  return { ok: false, model: model.id, effort, kind: result.kind, message: result.message }
+  return { ok: false, status: result.status, model: model.id, effort, kind: result.kind, message: result.message }
 }
 
 /** 刷新 access token。 */
