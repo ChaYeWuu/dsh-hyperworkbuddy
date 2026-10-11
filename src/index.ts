@@ -1028,6 +1028,19 @@ export function apply(ctx: Context, config: Config): void {
           json(res, 200, { ok: false, error: String(error), document: panelDocument() })
         }
       })
+
+      mount(`${ROUTE_PREFIX}/account/refresh`, async (req, res) => {
+        const body = await readJsonBody(req)
+        const account = typeof body['account'] === 'string' ? body['account'] : ''
+        const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
+        try {
+          const result = await pool.refreshAccount(account, variantId)
+          invalidate()
+          json(res, 200, { ok: result.ok, ...result, ...result.ok ? {} : { error: result.message }, document: panelDocument() })
+        } catch (error: unknown) {
+          json(res, 200, { ok: false, error: String(error), document: panelDocument() })
+        }
+      })
     })
   }
 

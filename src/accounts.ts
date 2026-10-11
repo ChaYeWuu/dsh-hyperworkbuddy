@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path'
 import type { WorkBuddyCredential } from './auth.ts'
 import { isExpiringSoon, readDesktopCredential } from './auth.ts'
 import { WORKBUDDY_VARIANTS, type WorkBuddyVariant } from './variants.ts'
-import { fetchCatalog, fetchCredits, parseUpstreamModel, refreshAccessToken, type CreditSnapshot, type UpstreamModel } from './upstream.ts'
+import { fetchCatalog, fetchCredits, parseUpstreamModel, probeAccount, refreshAccessToken, type AccountProbeResult, type CreditSnapshot, type UpstreamModel } from './upstream.ts'
 
 /** 一条被池管理的账号。 */
 export interface PoolAccount {
@@ -127,6 +127,9 @@ export async function resetEndpointKey(homeDir: string, custom?: string): Promis
 /** 单次冷却基数与上限：第一次 60 秒，翻倍到 1 小时。 */
 const COOLDOWN_BASE_MS = 60_000
 const COOLDOWN_MAX_MS = 3_600_000
+
+/** 这些失败归咎于账号本身，要计冷却；`client`（请求不被接受）不算账号的错。 */
+const PROBE_RETRYABLE_KINDS = new Set(['hard_credit', 'soft_rate', 'session_dead', 'server'])
 
 /** 会话亲和表上限；超出后保留最近一半，避免长跑进程内存无界增长。 */
 const STICKY_MAX_ENTRIES = 4096
@@ -542,6 +545,32 @@ export class AccountPool {
     }
     if (refreshed > 0) await this.persist()
     return refreshed
+  }
+
+  /**
+   * 强制刷新该账号的令牌，再做一次最小可用性探测。
+   *
+   * 令牌刷新失败不致命：refresh token 可能已失效，而 access token 仍在有效期内，
+   * 所以照常探测，结论以探测为准。
+   */
+  async refreshAccount(account: string, variantId: string): Promise<AccountProbeResult> {
+    const target = this.accounts.find(a => a.account === account && a.variantId === variantId)
+    if (target === undefined) throw new Error('账号不存在')
+    if (target.refreshToken !== '') {
+      try {
+        await this.applyRefresh(account, variantId, await refreshAccessToken(toCredential(target)))
+      } catch (error: unknown) {
+        this.noteFailure(account, variantId, `刷新 token 失败：${String(error)}`, false)
+      }
+    }
+    const result = await probeAccount(toCredential(target), target.models)
+    if (result.ok) {
+      this.noteSuccess(account, variantId)
+      await this.persist()
+    } else {
+      this.noteFailure(account, variantId, `${result.kind}: ${result.message}`, PROBE_RETRYABLE_KINDS.has(result.kind))
+    }
+    return result
   }
 
   /**

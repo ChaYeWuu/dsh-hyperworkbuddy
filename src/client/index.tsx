@@ -91,6 +91,10 @@ const zh = {
   disable: '停用',
   refreshCredits: '刷新积分',
   refreshCatalog: '刷新模型',
+  refreshAccount: '刷新账号',
+  refreshAccountDone: '凭据可用：{model}（档位 {effort}）',
+  refreshAccountNoEffort: '默认档',
+  refreshAccountHint: '刷新令牌并用一条最小请求验证账号状态',
   sourceDesktop: '桌面 App',
   sourceManual: '导入',
   statusReady: '可用',
@@ -221,6 +225,10 @@ const en: typeof zh = {
   disable: 'Disable',
   refreshCredits: 'Refresh credits',
   refreshCatalog: 'Refresh models',
+  refreshAccount: 'Refresh account',
+  refreshAccountDone: 'Credentials work: {model} (effort {effort})',
+  refreshAccountNoEffort: 'default',
+  refreshAccountHint: 'Refresh the token and verify the account with one minimal request',
   sourceDesktop: 'Desktop app',
   sourceManual: 'Imported',
   statusReady: 'Ready',
@@ -695,6 +703,28 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
           }, t('working')),
           actionButton(`catalog:${key}`, t('refreshCatalog'), () => {
             void run(`catalog:${key}`, '/account/catalog', { account: account.account, variantId: account.variantId })
+          }, t('working')),
+          actionButton(`refreshAccount:${key}`, t('refreshAccount'), () => {
+            const busyKey = `refreshAccount:${key}`
+            setNotice('')
+            setBusy(busyKey)
+            void (async () => {
+              try {
+                const raw = await postPayload('/account/refresh', { account: account.account, variantId: account.variantId })
+                if (raw.document !== undefined) setDoc(raw.document)
+                setNotice(raw.ok === true
+                  ? t('refreshAccountDone', {
+                    model: typeof raw['model'] === 'string' && raw['model'] !== '' ? raw['model'] : '—',
+                    effort: typeof raw['effort'] === 'string' && raw['effort'] !== '' ? raw['effort'] : t('refreshAccountNoEffort'),
+                  })
+                  : `${t('refreshAccount')}: ${typeof raw['error'] === 'string' ? raw['error'] : t('refreshAccountHint')}`)
+                setError('')
+              } catch (err) {
+                setError(String(err))
+              } finally {
+                setBusy('')
+              }
+            })()
           }, t('working')),
           actionButton(`toggle:${key}`, account.disabled ? t('enable') : t('disable'), () => {
             void run(`toggle:${key}`, '/account/toggle', {

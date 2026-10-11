@@ -908,6 +908,62 @@ export async function probeEfforts(
   return { accepted, detail, aborted: '' }
 }
 
+/** 一条最小可用性探测的结论。 */
+export interface AccountProbeResult {
+  /** 上游接了这条请求。 */
+  ok: boolean
+  /** 探测用的模型 id；目录为空时为空串。 */
+  model: string
+  /** 探测用的推理档位；模型未声明档位时为空串。 */
+  effort: string
+  /** 失败类别；通过时为空串。 */
+  kind: string
+  /** 面向用户的说明。 */
+  message: string
+}
+
+/** 取上游声明的最低档位；没声明就返回空串（省略该字段即走上游默认档）。 */
+function lowestEffort(model: UpstreamModel): string {
+  const declared = model.reasoning.supportedEfforts ?? []
+  return EFFORT_VALUES.find(effort => declared.includes(effort)) ?? ''
+}
+
+/**
+ * 用一条最小请求验证凭据当前可用。
+ *
+ * 优先挑免费模型，档位取声明的最低档，`max_tokens: 1`，把一次探测的开销压到最小。
+ * 上游接了请求就立刻断开，不读正文。
+ *
+ * @param credential - 目标凭据。
+ * @param models - 该账号缓存里的模型目录。
+ * @param signal - 取消信号。
+ * @returns 探测结论。
+ */
+export async function probeAccount(
+  credential: WorkBuddyCredential,
+  models: UpstreamModel[],
+  signal?: AbortSignal,
+): Promise<AccountProbeResult> {
+  const model = models.find(candidate => candidate.billing.free) ?? models[0]
+  if (model === undefined) {
+    return { ok: false, model: '', effort: '', kind: 'client', message: '目录里没有可用的模型，请先刷新模型' }
+  }
+  const effort = lowestEffort(model)
+  const body = JSON.stringify({
+    model: model.id,
+    stream: true,
+    messages: [{ role: 'user', content: 'ping' }],
+    max_tokens: 1,
+    ...effort === '' ? {} : { reasoning_effort: effort },
+  })
+  const result = await chatCompletions(credential, body, signal)
+  if (result.ok) {
+    try { await result.response.body?.cancel() } catch { /* 忽略 */ }
+    return { ok: true, model: model.id, effort, kind: '', message: '凭据可用' }
+  }
+  return { ok: false, model: model.id, effort, kind: result.kind, message: result.message }
+}
+
 /** 刷新 access token。 */
 export async function refreshAccessToken(
   credential: WorkBuddyCredential,
