@@ -39,6 +39,12 @@ const zh = {
   copied: '已复制',
   apiKey: 'API Key',
   apiKeyHint: '外部客户端填这个 Key；DSH 自身不需要。',
+  apiKeyRefresh: '重新生成',
+  apiKeyEdit: '自定义',
+  apiKeySave: '保存',
+  apiKeyCancel: '取消',
+  apiKeyPlaceholder: '留空则随机生成',
+  apiKeyFromConfig: '当前 Key 来自 profile 配置（apiKeys），请在配置里修改。',
   endpointHint: '把地址填进 Codex / Claude Code 等客户端的 Base URL。',
 
   refresh: '重新扫描并刷新',
@@ -137,6 +143,12 @@ const en: typeof zh = {
   copied: 'Copied',
   apiKey: 'API Key',
   apiKeyHint: 'Use this key in external clients; DSH itself does not need it.',
+  apiKeyRefresh: 'Regenerate',
+  apiKeyEdit: 'Custom',
+  apiKeySave: 'Save',
+  apiKeyCancel: 'Cancel',
+  apiKeyPlaceholder: 'Leave blank to generate one',
+  apiKeyFromConfig: 'This key comes from the profile config (apiKeys); edit it there.',
   endpointHint: 'Use this as the Base URL in Codex / Claude Code and other clients.',
 
   refresh: 'Rescan and refresh',
@@ -457,6 +469,8 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
   const [openForm, setOpenForm] = useState<'' | 'single' | 'hub' | 'login'>('')
   /** 进行中的链接登录：state 与要打开的授权页。 */
   const [login, setLogin] = useState<{ variantId: string; state: string; authUrl: string; message: string } | undefined>(undefined)
+  /** API Key 自定义编辑态：null 表示未展开。 */
+  const [keyDraft, setKeyDraft] = useState<string | null>(null)
   const [form, setForm] = useState({ variantId: '', accessToken: '', uid: '', enterpriseId: '', nickname: '' })
   const [hubText, setHubText] = useState('')
   const [notice, setNotice] = useState('')
@@ -806,8 +820,57 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
         actionButton('apikey', copied === 'apikey' ? t('copied') : t('copy'), () => {
           void copyText('apikey', doc.apiKey)
         }),
+        // 来自 profile 配置时不给改，避免改了没效果
+        doc.apiKeysConfigured
+          ? null
+          : actionButton('apikeyRefresh', t('apiKeyRefresh'), () => {
+            setBusy('apikeyRefresh')
+            void (async () => {
+              try {
+                const next = await postPayload('/apikey', {})
+                if (next.document !== undefined) setDoc(next.document)
+                const r = next as unknown as { ok: boolean; error?: string }
+                if (r.ok !== true) setError(r.error ?? '')
+                else setError('')
+              } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
+            })()
+          }, t('working')),
+        doc.apiKeysConfigured
+          ? null
+          : h('button', {
+            style: S.btn,
+            onClick: () => setKeyDraft(keyDraft === null ? doc.apiKey : null),
+          }, keyDraft === null ? t('apiKeyEdit') : t('apiKeyCancel')),
       ),
-      h('p', { style: { ...S.sub, marginTop: '4px' } }, t('apiKeyHint')),
+      // 自定义输入行
+      keyDraft === null
+        ? null
+        : h('div', { style: { ...S.row, marginTop: '8px' } },
+          h('input', {
+            style: { ...S.input, flex: 1, fontFamily: 'ui-monospace, monospace' },
+            placeholder: t('apiKeyPlaceholder'),
+            value: keyDraft,
+            onChange: (e: { target: { value: string } }) => setKeyDraft(e.target.value),
+          }),
+          h('button', {
+            style: S.btnPrimary,
+            disabled: busyAny,
+            onClick: () => {
+              setBusy('apikeySave')
+              void (async () => {
+                try {
+                  const next = await postPayload('/apikey', { key: keyDraft })
+                  if (next.document !== undefined) setDoc(next.document)
+                  const r = next as unknown as { ok: boolean; error?: string }
+                  if (r.ok !== true) setError(r.error ?? '')
+                  else { setError(''); setKeyDraft(null) }
+                } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
+              })()
+            },
+          }, busy === 'apikeySave' ? `${t('apiKeySave')} …` : t('apiKeySave')),
+        ),
+      h('p', { style: { ...S.sub, marginTop: '4px' } },
+        doc.apiKeysConfigured ? t('apiKeyFromConfig') : t('apiKeyHint')),
       h('p', { style: { ...S.sub, marginTop: '2px' } }, t('endpointHint')),
     ),
 

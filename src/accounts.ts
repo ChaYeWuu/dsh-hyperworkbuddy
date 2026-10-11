@@ -71,11 +71,28 @@ export const ACCOUNTS_FILENAME = '.hyperworkbuddy-accounts.json'
 /** 自动生成的端点密钥文件名。 */
 export const ENDPOINT_KEY_FILENAME = '.hyperworkbuddy-endpoint-key'
 
+/** 生成一把新的端点密钥。 */
+export function makeEndpointKey(): string {
+  return `hwb-${randomBytes(24).toString('base64url')}`
+}
+
+/**
+ * 写入端点密钥。
+ *
+ * @param homeDir - DSH home 目录。
+ * @param key - 要写入的密钥。
+ */
+export async function writeEndpointKey(homeDir: string, key: string): Promise<void> {
+  const path = join(homeDir, ENDPOINT_KEY_FILENAME)
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, key, { encoding: 'utf8', mode: 0o600 })
+}
+
 /**
  * 读取或生成端点密钥。
  *
  * 未配置 `apiKeys` 时用这把自动生成的密钥兜底，而不是完全放开——否则本机任意
- * 进程都能花掉用户的 WorkBuddy 额度。密钥落盘在 `$DSH_HOME` 下，面板会显示它
+ * 进程都能花掉用户的 WorkBuddy 额度。密钥落盘在 home 目录下，面板会显示它
  * 供外部客户端复制。
  *
  * @param homeDir - DSH home 目录。
@@ -89,9 +106,21 @@ export async function ensureEndpointKey(homeDir: string): Promise<string> {
   } catch {
     // 不存在则生成
   }
-  const key = `hwb-${randomBytes(24).toString('base64url')}`
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, key, { encoding: 'utf8', mode: 0o600 })
+  const key = makeEndpointKey()
+  await writeEndpointKey(homeDir, key)
+  return key
+}
+
+/**
+ * 重置端点密钥。
+ *
+ * @param homeDir - DSH home 目录。
+ * @param custom - 自定义密钥；省略则随机生成一把新的。
+ * @returns 生效的密钥。
+ */
+export async function resetEndpointKey(homeDir: string, custom?: string): Promise<string> {
+  const key = custom !== undefined && custom.trim() !== '' ? custom.trim() : makeEndpointKey()
+  await writeEndpointKey(homeDir, key)
   return key
 }
 

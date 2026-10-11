@@ -80,5 +80,49 @@ const imp = await call('/api-hyperworkbuddy/import', {
 console.log('  ok=' + imp.ok + ' imported=' + (imp.document && imp.document.importResult ? imp.document.importResult.imported : '(无)'))
 try { await services.get('hyperworkbuddy').pool.remove('probe-test:', 'hyperworkbuddy') } catch { /* 忽略 */ }
 
+console.log('\n=== API Key：重新生成 ===')
+const hyper = services.get('hyperworkbuddy')
+const before = hyper.document().apiKey
+const regen = await call('/api-hyperworkbuddy/apikey', {})
+console.log('  ok=' + regen.ok)
+console.log('  旧 Key=' + String(before).slice(0, 16) + '...')
+console.log('  新 Key=' + String(regen.apiKey).slice(0, 16) + '...')
+console.log('  已变化:', before !== regen.apiKey)
+console.log('  文档同步:', regen.document.apiKey === regen.apiKey)
+
+// 用真实对外端点验证：旧 Key 应立即失效、新 Key 应立即生效
+const ext = hyper.endpoint('hyperworkbuddy')
+if (ext) {
+  const status = async (key) => {
+    try {
+      const r = await fetch(ext.replace(/\/v1$/, '') + '/v1/models', {
+        headers: { Authorization: 'Bearer ' + key }, signal: AbortSignal.timeout(5000),
+      })
+      return String(r.status)
+    } catch (e) { return 'ERR ' + String(e).slice(0, 50) }
+  }
+  console.log('  旧 Key 访问 ->', await status(before))
+  console.log('  新 Key 访问 ->', await status(regen.apiKey))
+} else {
+  console.log('  (对外端点未运行，跳过连通性验证)')
+}
+
+console.log('\n=== API Key：自定义 ===')
+const custom = await call('/api-hyperworkbuddy/apikey', { key: 'my-custom-key-123' })
+console.log('  ok=' + custom.ok + ' apiKey=' + custom.apiKey)
+console.log('  自定义生效:', custom.apiKey === 'my-custom-key-123')
+const ext2 = hyper.endpoint('hyperworkbuddy')
+if (ext2) {
+  try {
+    const r = await fetch(ext2.replace(/\/v1$/, '') + '/v1/models', {
+      headers: { Authorization: 'Bearer my-custom-key-123' }, signal: AbortSignal.timeout(5000),
+    })
+    console.log('  用自定义 Key 访问 ->', r.status)
+  } catch (e) { console.log('  访问失败:', String(e).slice(0, 60)) }
+}
+// 收尾：写回一把随机 Key，不把测试用的固定值留在磁盘上
+await call('/api-hyperworkbuddy/apikey', {})
+console.log('  已恢复随机 Key:', String(hyper.document().apiKey).slice(0, 16) + '...')
+
 for (const d of effects) { try { d() } catch { /* 忽略 */ } }
 process.exit(0)

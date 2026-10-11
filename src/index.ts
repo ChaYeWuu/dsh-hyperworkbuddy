@@ -22,7 +22,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { ACCOUNTS_FILENAME, AccountPool, ensureEndpointKey, toCredential } from './accounts.ts'
+import { ACCOUNTS_FILENAME, AccountPool, ensureEndpointKey, resetEndpointKey, toCredential } from './accounts.ts'
 import { createHyperAdapter, type HyperAdapter } from './adapter.ts'
 import { parseHubExport } from './import.ts'
 import { createHyperShim, type HyperShim } from './shim.ts'
@@ -590,6 +590,28 @@ export function apply(ctx: Context, config: Config): void {
         await state.setEndpointEnabled(body['enabled'] === true)
         await applyEndpointSwitch()
         json(res, 200, { ok: true, document: panelDocument() })
+      })
+
+      // API Key：刷新（重新随机生成）或自定义
+      mount(`${ROUTE_PREFIX}/apikey`, async (req, res) => {
+        // 显式配置了 apiKeys 时以配置为准，面板不改写它，避免改了没效果。
+        if ((config.apiKeys ?? []).length > 0) {
+          json(res, 200, {
+            ok: false,
+            error: '当前 API Key 来自 profile 配置（apiKeys），请在配置里修改；或清空该配置后用这里的自定义',
+            document: panelDocument(),
+          })
+          return
+        }
+        const body = await readJsonBody(req)
+        const custom = typeof body['key'] === 'string' ? body['key'].trim() : undefined
+        const key = await resetEndpointKey(resolvedHome, custom)
+        endpointKey = key
+        // 端点每次鉴权都实时读取该值，无需重启。
+        ctx.logger.info(custom === undefined
+          ? 'hyperworkbuddy: API Key 已重新生成'
+          : 'hyperworkbuddy: API Key 已按自定义值更新')
+        json(res, 200, { ok: true, apiKey: key, document: panelDocument() })
       })
 
       // 单个模型的显隐开关
