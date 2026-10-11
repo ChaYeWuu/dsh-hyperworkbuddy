@@ -1,4 +1,4 @@
-// 验收：一键刷新、一键签到、链接登录三条新路由。
+// 验收：链接登录响应是否带 authUrl、第三方导入、档位探测。
 // 放在插件目录内运行，以复现 profile 的依赖解析。
 const services = new Map()
 const effects = []
@@ -43,43 +43,42 @@ async function call(path, body) {
   })
 }
 
-console.log('=== 新路由是否注册 ===')
-for (const p of ['/api-hyperworkbuddy/variant/refresh', '/api-hyperworkbuddy/variant/checkin', '/api-hyperworkbuddy/login/start', '/api-hyperworkbuddy/login/poll']) {
-  console.log('  ' + (routes.has(p) ? 'OK ' : 'MISSING ') + p)
-}
+console.log('=== 档位探测路由 ===')
+console.log('  ' + (routes.has('/api-hyperworkbuddy/model/probe') ? 'OK' : 'MISSING') + ' /api-hyperworkbuddy/model/probe')
 
-console.log('\n=== 一键刷新（国内版）===')
-const r = await call('/api-hyperworkbuddy/variant/refresh', { variantId: 'hyperworkbuddy' })
-console.log('  目录 成功=' + r.catalogsOk + ' 失败=' + r.catalogsFailed + ' | 积分 成功=' + r.creditsOk + ' 失败=' + r.creditsFailed)
-const cn = r.document.variants.find(v => v.id === 'hyperworkbuddy')
-for (const a of cn.accounts.slice(0, 3)) {
-  console.log('   ' + a.account + ' 积分=' + (a.credits ? a.credits.remaining + '/' + a.credits.total : '未获取'))
-}
+console.log('\n=== 链接登录：响应必须带 authUrl（面板靠它跳转）===')
+const s = await call('/api-hyperworkbuddy/login/start', { variantId: 'hyperworkbuddy' })
+console.log('  ok=' + s.ok)
+console.log('  有 state 字段:', typeof s.state === 'string' && s.state !== '')
+console.log('  有 authUrl 字段:', typeof s.authUrl === 'string' && s.authUrl !== '')
+console.log('  有 document 字段:', s.document !== undefined)
+if (s.authUrl) console.log('  authUrl=' + String(s.authUrl).slice(0, 100) + '...')
 
-console.log('\n=== 一键签到（国内版）===')
-const c = await call('/api-hyperworkbuddy/variant/checkin', { variantId: 'hyperworkbuddy' })
-console.log('  ok=' + c.ok)
-for (const x of c.results ?? []) console.log('   ' + x.account + ' -> ok=' + x.ok + ' ' + x.message)
-
-console.log('\n=== 签到（国际版，应被拒）===')
-const cAi = await call('/api-hyperworkbuddy/variant/checkin', { variantId: 'hyperworkbuddy-ai' })
-console.log('  ok=' + cAi.ok + ' error=' + (cAi.error ?? '(无)'))
-
-console.log('\n=== 链接登录：起一次 ===')
+console.log('\n=== 档位探测：对未声明档位的模型（deepseek-v4.1-flash）===')
 try {
-  const s = await call('/api-hyperworkbuddy/login/start', { variantId: 'hyperworkbuddy' })
-  console.log('  ok=' + s.ok)
-  if (s.ok) {
-    console.log('  state=' + String(s.state).slice(0, 16) + '...')
-    console.log('  authUrl=' + String(s.authUrl).slice(0, 120) + '...')
-    const p = await call('/api-hyperworkbuddy/login/poll', { state: s.state })
-    console.log('  轮询一次 -> status=' + p.status + ' message=' + (p.message ?? p.error ?? ''))
-  } else {
-    console.log('  error=' + s.error)
+  const probe = await call('/api-hyperworkbuddy/model/probe', { variantId: 'hyperworkbuddy', modelId: 'deepseek-v4.1-flash' })
+  console.log('  ok=' + probe.ok + (probe.error ? ' error=' + probe.error : ''))
+  for (const d of probe.detail ?? []) {
+    console.log('   ' + String(d.effort).padEnd(8) + ' accepted=' + d.accepted + '  ' + String(d.reason).slice(0, 70))
+  }
+  console.log('  被接受:', JSON.stringify(probe.accepted ?? []))
+  if (probe.document) {
+    const m = probe.document.variants[0].models.find(x => x.id === 'deepseek-v4.1-flash')
+    console.log('  面板里 efforts=' + JSON.stringify(m?.efforts) + ' source=' + m?.effortsSource)
   }
 } catch (e) {
   console.log('  失败: ' + String(e).slice(0, 200))
 }
 
-for (const d of effects) { try { d() } catch {} }
+console.log('\n=== 第三方导入：WorkBuddy2API-Hub 导出文档 ===')
+const imp = await call('/api-hyperworkbuddy/import', {
+  payload: JSON.stringify({
+    format: 'workbuddy-accounts', version: 1, count: 1,
+    accounts: [{ uid: 'probe-test', nickname: '探测用', domain: 'www.workbuddy.cn', accessToken: 'a.b.c', refreshToken: '' }],
+  }),
+})
+console.log('  ok=' + imp.ok + ' imported=' + (imp.document && imp.document.importResult ? imp.document.importResult.imported : '(无)'))
+try { await services.get('hyperworkbuddy').pool.remove('probe-test:', 'hyperworkbuddy') } catch { /* 忽略 */ }
+
+for (const d of effects) { try { d() } catch { /* 忽略 */ } }
 process.exit(0)

@@ -744,6 +744,65 @@ export async function checkin(credential: WorkBuddyCredential): Promise<CheckinR
   }
 }
 
+/**
+ * 探测一个模型接受哪些推理档位。
+ *
+ * 上游只在部分模型上声明 `supportedEfforts`；没声明的模型在 DSH 里就没有档位
+ * 控件。这里逐个档位发一条最小请求，只认「上游没有因为该档位而报错」：
+ *
+ * - 返回 200 且能开流 → 该档位被接受
+ * - 返回 400 且错误里提到档位参数 → 该档位不被接受
+ * - 其他失败（限流、网络、额度）→ 保守判为不可用，不猜测
+ *
+ * 探测会消耗少量额度，因此只在用户显式触发时执行。
+ *
+ * @param credential - 目标凭据。
+ * @param modelId - 模型 id。
+ * @param signal - 取消信号。
+ * @returns 被接受的档位列表与逐档位的结果。
+ */
+export async function probeEfforts(
+  credential: WorkBuddyCredential,
+  modelId: string,
+  signal?: AbortSignal,
+): Promise<{ accepted: string[]; detail: { effort: string; accepted: boolean; reason: string }[]; aborted: string }> {
+  const detail: { effort: string; accepted: boolean; reason: string }[] = []
+  const accepted: string[] = []
+
+  for (const effort of EFFORT_VALUES) {
+    const body = JSON.stringify({
+      model: modelId,
+      stream: true,
+      messages: [{ role: 'user', content: 'ping' }],
+      // 探测只关心参数是否被接受，把开销压到最小。
+      max_tokens: 1,
+      reasoning_effort: effort,
+    })
+    const result = await chatCompletions(credential, body, signal)
+    if (result.ok) {
+      // 上游接了这条请求，立刻断开，不必读正文。
+      try { await result.response.body?.cancel() } catch { /* 忽略 */ }
+      accepted.push(effort)
+      detail.push({ effort, accepted: true, reason: '上游接受' })
+      continue
+    }
+    // 限流或额度不足时后面的档位必然同样失败，立刻收手而不是白跑四轮。
+    if (result.kind === 'soft_rate' || result.kind === 'hard_credit' || result.kind === 'session_dead') {
+      detail.push({ effort, accepted: false, reason: `探测中止：${result.message}` })
+      return { accepted, detail, aborted: result.kind }
+    }
+    // 只有明确指向档位参数的参数校验失败才算「不接受」。
+    const rejected = result.status === 400 && /reasoning|effort|11133/i.test(result.message)
+    detail.push({
+      effort,
+      accepted: false,
+      reason: rejected ? `上游拒绝该档位：${result.message}` : `未验证（${result.kind}）：${result.message}`,
+    })
+  }
+
+  return { accepted, detail, aborted: '' }
+}
+
 /** 刷新 access token。 */
 export async function refreshAccessToken(
   credential: WorkBuddyCredential,

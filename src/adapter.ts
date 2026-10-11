@@ -54,33 +54,44 @@ const INERT_AUTH = {
 /**
  * 把上游声明的推理档位翻成 pi-ai 的 `thinkingLevelMap`。
  *
- * 只有上游明确声明了非空档位集合才给出控件——未声明的模型，它的可选档位属于客户端
- * 私有知识，目录里没有，凭空补一套只会给出实际会被上游忽略的选项。
+ * 优先用上游声明的 `supportedEfforts`；没声明时退回本地探测结果（用户显式触发的
+ * 逐档位试请求）。两者都没有就不给控件——凭空补一套只会给出实际会被上游忽略的选项。
  * `off` 仅在上游声明 `canDisableThinking` 时提供。
  *
  * @param info - 一条上游模型。
+ * @param probed - 本地探测得到的档位；仅当上游未声明时生效。
  * @returns pi-ai 的推理字段；不支持时为 `{ reasoning: false }`。
  */
-export function reasoningFields(info: UpstreamModel): { reasoning: boolean; thinkingLevelMap?: ThinkingLevelMap } {
+export function reasoningFields(
+  info: UpstreamModel,
+  probed: readonly string[] = [],
+): { reasoning: boolean; thinkingLevelMap?: ThinkingLevelMap } {
   const declared = info.reasoning.supportedEfforts
-  if (info.reasoning.supports !== true || declared === undefined || declared.length === 0) {
+  // 上游声明优先；只有它没说话时才采纳探测结果。
+  const efforts: readonly string[] | undefined = declared !== undefined && declared.length > 0
+    ? declared
+    : probed.length > 0
+      ? probed
+      : undefined
+  if (info.reasoning.supports !== true || efforts === undefined) {
     return { reasoning: false }
   }
+  const has = (level: string): string | null => (efforts.includes(level) ? level : null)
   const map: Record<ModelThinkingLevel, string | null> = {
     off: info.reasoning.canDisableThinking ? 'off' : null,
-    // `minimal` 不在上游的档位词表里，声明集永远不会包含它。
+    // `minimal` 不在上游的档位词表里。
     minimal: null,
-    low: declared.includes('low') ? 'low' : null,
-    medium: declared.includes('medium') ? 'medium' : null,
-    high: declared.includes('high') ? 'high' : null,
-    xhigh: declared.includes('xhigh') ? 'xhigh' : null,
-    max: declared.includes('max') ? 'max' : null,
+    low: has('low'),
+    medium: has('medium'),
+    high: has('high'),
+    xhigh: has('xhigh'),
+    max: has('max'),
   }
   return { reasoning: true, thinkingLevelMap: map as ThinkingLevelMap }
 }
 
 /** 把一条上游模型转成 pi-ai 模型描述。 */
-function toPiModel(info: UpstreamModel, baseUrl: string, providerId: string): Model<Api> {
+function toPiModel(info: UpstreamModel, baseUrl: string, providerId: string, probed: readonly string[]): Model<Api> {
   return {
     id: info.id,
     name: info.name,
@@ -88,7 +99,7 @@ function toPiModel(info: UpstreamModel, baseUrl: string, providerId: string): Mo
     provider: providerId,
     baseUrl,
     input: info.supportsImages ? ['text', 'image'] : ['text'],
-    ...reasoningFields(info),
+    ...reasoningFields(info, probed),
     cost: NO_COST,
     contextWindow: info.contextWindow,
     maxTokens: info.maxTokens,
@@ -116,6 +127,8 @@ export interface HyperAdapterOptions {
   variantId: string
   /** 当前隐藏的模型 id。 */
   hidden: () => string[]
+  /** 某模型本地探测到的推理档位；上游未声明时生效。 */
+  probedEfforts?: (modelId: string) => readonly string[]
   /**
    * 图片附件存储。
    *
@@ -141,7 +154,9 @@ export function createHyperAdapter(options: HyperAdapterOptions): HyperAdapter {
   const buildModels = (): Model<Api>[] => {
     // pi-ai 驱动的 OpenAI SDK 会在 baseURL 后拼 `/chat/completions`。
     const baseUrl = `${shim.baseUrl()}/v1`
-    return pool.modelsFor(variantId).map(model => toPiModel(model, baseUrl, providerId))
+    return pool.modelsFor(variantId).map(model => toPiModel(
+      model, baseUrl, providerId, options.probedEfforts?.(model.id) ?? [],
+    ))
   }
 
   /** 选择器可见的模型：隐藏只影响可选择性，不影响已在用的会话。 */

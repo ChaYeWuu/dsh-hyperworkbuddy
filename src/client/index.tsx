@@ -54,13 +54,17 @@ const zh = {
   linkLoginOpening: '正在生成…',
   linkLoginStep: '① 点下面的按钮在浏览器里打开授权页；② 完成登录后回到这里，插件会自动收取账号。',
   linkLoginOpen: '打开授权页',
+  linkLoginOpenHint: '若浏览器没有自动打开，点下面的按钮。',
   linkLoginWaiting: '等待浏览器完成授权…',
   linkLoginOk: '已添加账号 {name}',
   linkLoginFailed: '登录未完成',
   addAccount: '导入单个账号',
   addHint: '粘贴 accessToken 可追加单个账号。',
-  importHub: '导入 hub 导出',
-  importHubHint: '粘贴 workbuddy2api-hub 的导出 JSON（或裸账号数组 / 单个账号对象），可一次导入多个账号。',
+  accountImport: '账号导入',
+  thirdPartyImport: '第三方导入',
+  thirdPartyHint: '从其它 WorkBuddy 管理面板迁移账号。',
+  importHub: 'WorkBuddy2API-Hub 导入',
+  importHubHint: '粘贴 WorkBuddy2API-Hub 的导出文档；也接受账号数组、单个账号对象与桌面客户端凭据，可一次导入多个账号。',
   importHubPlaceholder: '{ "format": "workbuddy-accounts", "accounts": [ … ] }',
   doImport: '导入',
   importOk: '已导入 {n} 个账号',
@@ -104,6 +108,11 @@ const zh = {
   gone: '上游已下架',
   reasoning: '推理档位',
   reasoningDefault: '默认',
+  reasoningProbed: '探测得出',
+  reasoningProbe: '探测档位',
+  reasoningProbing: '探测中',
+  reasoningNone: '未声明',
+  reasoningProbeHint: '上游未声明档位时可手动探测：逐个档位发一条最小请求，只采纳上游接受的档位。会消耗少量额度。',
 
   loading: '加载中…',
   loadFailed: '加载失败',
@@ -143,13 +152,17 @@ const en: typeof zh = {
   linkLoginOpening: 'Generating…',
   linkLoginStep: '① Open the authorisation page below in your browser; ② come back here once signed in — the plugin collects the account automatically.',
   linkLoginOpen: 'Open authorisation page',
+  linkLoginOpenHint: 'If the browser did not open automatically, use the button below.',
   linkLoginWaiting: 'Waiting for the browser to finish…',
   linkLoginOk: 'Added account {name}',
   linkLoginFailed: 'Sign-in did not complete',
   addAccount: 'Import one account',
   addHint: 'Paste an accessToken to add a single account.',
-  importHub: 'Import hub export',
-  importHubHint: 'Paste a workbuddy2api-hub export JSON (or a bare account array / single account object) to import many at once.',
+  accountImport: 'Account import',
+  thirdPartyImport: 'Third-party import',
+  thirdPartyHint: 'Migrate accounts from another WorkBuddy management panel.',
+  importHub: 'WorkBuddy2API-Hub import',
+  importHubHint: 'Paste a WorkBuddy2API-Hub export document; account arrays, single account objects and desktop credentials are also accepted.',
   importHubPlaceholder: '{ "format": "workbuddy-accounts", "accounts": [ … ] }',
   doImport: 'Import',
   importOk: 'Imported {n} account(s)',
@@ -193,6 +206,11 @@ const en: typeof zh = {
   gone: 'no longer served',
   reasoning: 'Reasoning levels',
   reasoningDefault: 'default',
+  reasoningProbed: 'probed',
+  reasoningProbe: 'Probe levels',
+  reasoningProbing: 'Probing',
+  reasoningNone: 'not declared',
+  reasoningProbeHint: 'When the upstream declares no levels, probe them: one minimal request per level, keeping only the accepted ones. Consumes a little credit.',
 
   loading: 'Loading…',
   loadFailed: 'Failed to load',
@@ -215,6 +233,8 @@ interface PanelModel {
   /** 上游声明的推理档位；空数组表示该模型没有档位控件。 */
   efforts: string[]
   defaultEffort: string
+  /** 档位来源：上游声明、本地探测，或都没有。 */
+  effortsSource: 'declared' | 'probed' | 'none'
 }
 
 /** 面板账号条目。 */
@@ -284,16 +304,34 @@ async function fetchStatus(): Promise<PanelDocument> {
   return await response.json() as PanelDocument
 }
 
-/** 调用一个返回新状态文档的管理接口。 */
+/** 调用一个返回新状态文档的管理接口，只取文档。 */
 async function postDocument(path: string, body: unknown): Promise<PanelDocument> {
+  const payload = await postPayload(path, body)
+  if (payload.document !== undefined) return payload.document
+  throw new Error(payload.error ?? '响应缺少 document')
+}
+
+/** 管理接口的完整响应：既有状态文档，也有接口自己的字段（如登录的 authUrl）。 */
+async function postPayload(path: string, body: unknown): Promise<Record<string, unknown> & { document?: PanelDocument }> {
   const response = await fetch(`${ROUTE_PREFIX}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  const payload = await response.json() as { document?: PanelDocument; error?: string }
-  if (payload.document !== undefined) return payload.document
-  throw new Error(payload.error ?? `HTTP ${response.status}`)
+  const payload = await response.json() as Record<string, unknown>
+  if (!response.ok && payload['document'] === undefined) {
+    throw new Error(typeof payload['error'] === 'string' ? payload['error'] : `HTTP ${response.status}`)
+  }
+  return payload
+}
+
+/** 在默认浏览器里打开一个外部链接。 */
+function openExternal(url: string): void {
+  try {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  } catch {
+    // 弹窗被拦截时用户仍可用下面的按钮或手动复制地址
+  }
 }
 
 /** 格式化时间。 */
@@ -655,17 +693,21 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
           ),
         ),
         h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('modelsHint')),
+        h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('reasoningProbeHint')),
         variant.models.length === 0
           ? h('div', { style: S.muted }, t('noModels'))
           : h('div', { style: S.modelGrid },
             variant.models.map(model => {
               const modelKey = `model:${variant.id}:${model.id}`
-              return h('label', {
+              const probeKey = `probe:${variant.id}:${model.id}`
+              // 上游声明了档位就不必探测；没声明且模型本身支持推理才给探测入口。
+              const canProbe = model.effortsSource === 'none' && model.available
+              return h('div', {
                 key: model.id,
                 style: { ...S.modelCell, opacity: model.visible ? 1 : 0.55, flexDirection: 'column', alignItems: 'stretch', gap: '2px' },
                 title: `${model.id}\nctx ${model.contextWindow} · max ${model.maxTokens}${model.supportsImages ? ' · 图片' : ''}${model.credits === undefined ? '' : ` · ${model.credits}`}`,
               },
-                h('div', { style: { ...S.row, gap: '6px' } },
+                h('label', { style: { ...S.row, gap: '6px', cursor: 'pointer' } },
                   h('input', {
                     type: 'checkbox',
                     checked: model.visible,
@@ -679,11 +721,11 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                   model.free ? h('span', { style: { ...S.badge, ...S.badgeOk } }, '免费') : null,
                   model.available ? null : h('span', { style: { ...S.badge, ...S.badgeOff } }, t('gone')),
                 ),
-                model.efforts.length === 0
-                  ? null
-                  : h('div', { style: { ...S.row, gap: '4px', paddingLeft: '22px' } },
-                    h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('reasoning')}:`),
-                    model.efforts.map(effort => h('span', {
+                h('div', { style: { ...S.row, gap: '4px', paddingLeft: '22px' } },
+                  h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('reasoning')}:`),
+                  model.efforts.length === 0
+                    ? h('span', { style: { ...S.muted, fontSize: '11px' } }, t('reasoningNone'))
+                    : model.efforts.map(effort => h('span', {
                       key: effort,
                       style: {
                         ...S.badge,
@@ -691,9 +733,30 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                         fontSize: '10px',
                         padding: '0 4px',
                       },
-                      title: effort === model.defaultEffort ? t('reasoningDefault') : undefined,
+                      title: [
+                        effort === model.defaultEffort ? t('reasoningDefault') : '',
+                        model.effortsSource === 'probed' ? t('reasoningProbed') : '',
+                      ].filter(Boolean).join(' · ') || undefined,
                     }, effort)),
-                  ),
+                  model.effortsSource === 'probed' ? h('span', { style: { ...S.badge, ...S.badgeInfo, fontSize: '10px', padding: '0 4px' } }, t('reasoningProbed')) : null,
+                  canProbe
+                    ? actionButton(probeKey, t('reasoningProbe'), () => {
+                      setBusy(probeKey)
+                      setNotice('')
+                      void (async () => {
+                        try {
+                          const next = await postPayload('/model/probe', { variantId: variant.id, modelId: model.id })
+                          if (next.document !== undefined) setDoc(next.document)
+                          const r = next as unknown as { ok: boolean; accepted?: string[]; error?: string }
+                          setNotice(r.ok === true && (r.accepted?.length ?? 0) > 0
+                            ? `${model.name}: ${(r.accepted ?? []).join(' / ')}`
+                            : `${model.name}: ${r.error ?? t('reasoningNone')}`)
+                          setError('')
+                        } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
+                      })()
+                    }, t('reasoningProbing'))
+                    : null,
+                ),
               )
             }),
           ),
@@ -751,10 +814,10 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
     // 版本分区
     doc.variants.map(variantSection),
 
-    // 刷新与导入
+    // 账号导入
     h('div', { style: S.card },
       h('div', { style: { ...S.cardTitle, justifyContent: 'space-between' } },
-        h('span', null, t('importHub')),
+        h('span', null, t('accountImport')),
         h('div', { style: S.row },
           actionButton('refresh', t('refresh'), () => {
             void run('refresh', '/refresh', {})
@@ -768,10 +831,6 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
               setOpenForm(openForm === 'login' ? '' : 'login')
             },
           }, t('linkLogin')),
-          h('button', {
-            style: S.btn,
-            onClick: () => setOpenForm(openForm === 'hub' ? '' : 'hub'),
-          }, t('importHub')),
           h('button', {
             style: S.btn,
             onClick: () => {
@@ -807,26 +866,28 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                   setBusy('login')
                   setNotice('')
                   try {
-                    const next = await postDocument('/login/start', { variantId: form.variantId })
-                    const payload = next as unknown as { ok: boolean; state?: string; authUrl?: string; error?: string }
-                    setDoc(next)
+                    // 用 postPayload：authUrl/state 是接口自己的字段，
+                    // postDocument 只取 document，会把它们丢掉。
+                    const raw = await postPayload('/login/start', { variantId: form.variantId })
+                    const payload = raw as unknown as { ok: boolean; state?: string; authUrl?: string; error?: string }
+                    if (raw.document !== undefined) setDoc(raw.document)
                     if (payload.ok && payload.state !== undefined && payload.authUrl !== undefined) {
                       setLogin({ variantId: form.variantId, state: payload.state, authUrl: payload.authUrl, message: '' })
-                      // 立刻在浏览器里打开授权页，省掉一次手动复制。
-                      try { window.open(payload.authUrl, '_blank', 'noopener') } catch { /* 被拦截时用户可手动点 */ }
+                      setBusy('')
+                      // 立刻在默认浏览器里打开授权页，省掉一次手动复制。
+                      openExternal(payload.authUrl)
                       // 开始轮询，直到拿到账号或超时。
                       const started = Date.now()
                       const timer = setInterval(() => {
                         void (async () => {
                           try {
-                            const polled = await postDocument('/login/poll', { state: payload.state })
-                            const r = polled as unknown as { ok: boolean; status: string; message?: string; error?: string; account?: { nickname: string; account: string } }
-                            setDoc(polled)
+                            const raw2 = await postPayload('/login/poll', { state: payload.state })
+                            const r = raw2 as unknown as { ok: boolean; status: string; message?: string; error?: string; account?: { nickname: string; account: string } }
+                            if (raw2.document !== undefined) setDoc(raw2.document)
                             if (r.status === 'pending') {
                               setLogin(prev => prev === undefined ? prev : { ...prev, message: r.message ?? '' })
                             } else {
                               clearInterval(timer)
-                              setBusy('')
                               if (r.ok && r.account !== undefined) {
                                 setNotice(t('linkLoginOk', { name: r.account.nickname || r.account.account }))
                                 setLogin(undefined)
@@ -836,7 +897,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                               }
                             }
                             // 与上游一致的 10 分钟窗口，客户端这边留点余量。
-                            if (Date.now() - started > 9 * 60 * 1000) { clearInterval(timer); setBusy(''); setLogin(undefined) }
+                            if (Date.now() - started > 9 * 60 * 1000) { clearInterval(timer); setLogin(undefined) }
                           } catch {
                             // 单次失败不打断轮询
                           }
@@ -862,10 +923,11 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                 h('span', { style: { ...S.badge, ...S.badgeInfo } }, '⟳'),
                 h('span', { style: S.muted }, login.message === '' ? t('linkLoginWaiting') : login.message),
               ),
+              h('p', { style: { ...S.sub, marginBottom: '6px' } }, t('linkLoginOpenHint')),
               h('div', { style: S.row },
                 h('button', {
-                  style: S.btn,
-                  onClick: () => { try { window.open(login.authUrl, '_blank', 'noopener') } catch { /* 用户可手动复制 */ } },
+                  style: S.btnPrimary,
+                  onClick: () => openExternal(login.authUrl),
                 }, t('linkLoginOpen')),
                 actionButton('loginUrl', copied === 'loginUrl' ? t('copied') : t('copy'), () => {
                   void copyText('loginUrl', login.authUrl)
@@ -876,48 +938,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
         )
         : null,
 
-      openForm === 'hub'
-        ? h('div', { style: { marginTop: '6px' } },
-          h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('importHubHint')),
-          h('textarea', {
-            style: { ...S.input, minHeight: '120px', resize: 'vertical', fontFamily: 'ui-monospace, monospace' },
-            placeholder: t('importHubPlaceholder'),
-            value: hubText,
-            onChange: (e: { target: { value: string } }) => setHubText(e.target.value),
-          }),
-          h('div', { style: { ...S.row, marginTop: '8px' } },
-            h('button', {
-              style: S.btnPrimary,
-              disabled: busyAny || hubText.trim() === '',
-              onClick: () => {
-                void (async () => {
-                  setBusy('import')
-                  try {
-                    const next = await postDocument('/import', { payload: hubText })
-                    setDoc(next)
-                    const result = next.importResult
-                    if (result !== undefined && result.error !== '') setNotice(result.error)
-                    else if (result !== undefined) {
-                      setNotice(
-                        t('importOk', { n: result.imported })
-                        + (result.skipped.length > 0 ? t('importSkipped', { n: result.skipped.length }) : ''),
-                      )
-                      setHubText('')
-                      setOpenForm('')
-                    }
-                    setError('')
-                  } catch (err: unknown) {
-                    setError(String(err))
-                  } finally {
-                    setBusy('')
-                  }
-                })()
-              },
-            }, busy === 'import' ? `${t('doImport')} …` : t('doImport')),
-            h('button', { style: S.btn, onClick: () => setOpenForm('') }, t('cancel')),
-          ),
-        )
-        : null,
+      notice === '' ? null : h('div', { style: { ...S.muted, marginBottom: '8px', color: 'inherit' } }, notice),
 
       openForm === 'single'
         ? h('div', { style: { marginTop: '6px' } },
@@ -965,6 +986,61 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                   setOpenForm('')
                   setForm({ variantId: form.variantId, accessToken: '', uid: '', enterpriseId: '', nickname: '' })
                 })
+              },
+            }, busy === 'import' ? `${t('doImport')} …` : t('doImport')),
+            h('button', { style: S.btn, onClick: () => setOpenForm('') }, t('cancel')),
+          ),
+        )
+        : null,
+    ),
+
+    // 第三方导入
+    h('div', { style: S.card },
+      h('div', { style: S.cardTitle }, t('thirdPartyImport')),
+      h('p', { style: { ...S.sub, marginBottom: '10px' } }, t('thirdPartyHint')),
+      h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+        h('span', { style: { fontWeight: 600 } }, t('importHub')),
+        h('button', {
+          style: S.btn,
+          onClick: () => setOpenForm(openForm === 'hub' ? '' : 'hub'),
+        }, openForm === 'hub' ? t('cancel') : t('doImport')),
+      ),
+      openForm === 'hub'
+        ? h('div', { style: { marginTop: '8px' } },
+          h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('importHubHint')),
+          h('textarea', {
+            style: { ...S.input, minHeight: '120px', resize: 'vertical', fontFamily: 'ui-monospace, monospace' },
+            placeholder: t('importHubPlaceholder'),
+            value: hubText,
+            onChange: (e: { target: { value: string } }) => setHubText(e.target.value),
+          }),
+          h('div', { style: { ...S.row, marginTop: '8px' } },
+            h('button', {
+              style: S.btnPrimary,
+              disabled: busyAny || hubText.trim() === '',
+              onClick: () => {
+                void (async () => {
+                  setBusy('import')
+                  try {
+                    const next = await postDocument('/import', { payload: hubText })
+                    setDoc(next)
+                    const result = next.importResult
+                    if (result !== undefined && result.error !== '') setNotice(result.error)
+                    else if (result !== undefined) {
+                      setNotice(
+                        t('importOk', { n: result.imported })
+                        + (result.skipped.length > 0 ? t('importSkipped', { n: result.skipped.length }) : ''),
+                      )
+                      setHubText('')
+                      setOpenForm('')
+                    }
+                    setError('')
+                  } catch (err: unknown) {
+                    setError(String(err))
+                  } finally {
+                    setBusy('')
+                  }
+                })()
               },
             }, busy === 'import' ? `${t('doImport')} …` : t('doImport')),
             h('button', { style: S.btn, onClick: () => setOpenForm('') }, t('cancel')),

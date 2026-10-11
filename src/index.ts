@@ -27,7 +27,7 @@ import { createHyperAdapter, type HyperAdapter } from './adapter.ts'
 import { parseHubExport } from './import.ts'
 import { createHyperShim, type HyperShim } from './shim.ts'
 import { PluginState } from './state.ts'
-import { checkin, pollLogin, startLogin } from './upstream.ts'
+import { checkin, pollLogin, probeEfforts, startLogin } from './upstream.ts'
 import { WORKBUDDY_VARIANTS, variantFor, type WorkBuddyVariant } from './variants.ts'
 
 /** Cordis 插件名。 */
@@ -84,6 +84,8 @@ interface PanelModel {
   /** 上游声明的推理档位；空数组表示该模型没有档位控件。 */
   efforts: string[]
   defaultEffort: string
+  /** 档位来自哪里：上游声明、本地探测，或都没有。 */
+  effortsSource: 'declared' | 'probed' | 'none'
 }
 
 /** 面板里的一个账号。 */
@@ -371,6 +373,10 @@ export function apply(ctx: Context, config: Config): void {
         if (account.variantId !== variant.id) continue
         for (const model of account.models) {
           if (byId.has(model.id)) continue
+          const declared = model.reasoning.supportedEfforts ?? []
+          const probed = state.probedFor(variant.id, model.id)
+          // 上游声明优先；没声明才用本地探测结果。
+          const efforts = declared.length > 0 ? declared : probed
           byId.set(model.id, {
             id: model.id,
             name: model.name,
@@ -381,8 +387,9 @@ export function apply(ctx: Context, config: Config): void {
             free: model.billing.free,
             visible: !hidden.has(model.id),
             available: true,
-            efforts: model.reasoning.supportedEfforts ?? [],
+            efforts,
             defaultEffort: model.reasoning.defaultEffort ?? '',
+            effortsSource: declared.length > 0 ? 'declared' : probed.length > 0 ? 'probed' : 'none',
           })
         }
       }
@@ -400,6 +407,7 @@ export function apply(ctx: Context, config: Config): void {
           available: false,
           efforts: [],
           defaultEffort: '',
+          effortsSource: 'none',
         })
       }
 
@@ -503,6 +511,7 @@ export function apply(ctx: Context, config: Config): void {
         pool,
         variantId: variant.id,
         hidden: () => state.hidden(variant.id),
+        probedEfforts: (modelId: string) => state.probedFor(variant.id, modelId),
         // 图片必须走宿主的附件服务，否则声明了图片能力的模型一发图就报
         // 「pi-ai image input requires the durable attachment service」。
         resolveAttachments: () => ctx.get('attachments'),
@@ -680,6 +689,39 @@ export function apply(ctx: Context, config: Config): void {
           await pool.refreshCredits(account.account, variantId).catch(() => undefined)
         }
         json(res, 200, { ok: true, results, document: panelDocument() })
+      })
+
+      // 推理档位探测：上游没声明档位的模型，靠逐档位试请求测出可用集合
+      mount(`${ROUTE_PREFIX}/model/probe`, async (req, res) => {
+        const body = await readJsonBody(req)
+        const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
+        const modelId = typeof body['modelId'] === 'string' ? body['modelId'] : ''
+        if (variantFor(variantId) === undefined || modelId === '') {
+          json(res, 400, { ok: false, error: '缺少 variantId 或 modelId', document: panelDocument() })
+          return
+        }
+        // 用该版本里第一个可用账号发起探测。
+        const account = pool.available(variantId)[0]
+        if (account === undefined) {
+          json(res, 200, { ok: false, error: '该版本没有可用账号', document: panelDocument() })
+          return
+        }
+        try {
+          const result = await probeEfforts(toCredential(account), modelId)
+          // 被限流/额度不足时不算探测结论，不写状态。
+          if (result.aborted === '') {
+            await state.setEfforts(variantId, modelId, result.accepted)
+            invalidate()
+          }
+          json(res, 200, {
+            ok: result.aborted === '',
+            ...result,
+            ...result.aborted === '' ? {} : { error: result.detail.at(-1)?.reason ?? '探测中止' },
+            document: panelDocument(),
+          })
+        } catch (error: unknown) {
+          json(res, 200, { ok: false, error: String(error), document: panelDocument() })
+        }
       })
 
       // 浏览器授权登录：起一次
