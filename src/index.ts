@@ -402,6 +402,18 @@ export function apply(ctx: Context, config: Config): void {
     ctx.emit('llm/adapters-updated')
   }
 
+  /** 用量汇总里的账号补上昵称；流水只记 id，昵称随时会变，所以每次出口现取。 */
+  function withNicknames(summary: UsageSummary): UsageSummary {
+    const names = new Map(pool.list().map(account => [account.account, account.nickname]))
+    return {
+      ...summary,
+      byAccount: summary.byAccount.map(row => {
+        const nickname = names.get(row.account)
+        return nickname === undefined || nickname === '' ? row : { ...row, nickname }
+      }),
+    }
+  }
+
   /** 组装面板状态文档。 */
   function panelDocument(importResult?: ImportResult): PanelDocument {
     const now = Date.now()
@@ -508,7 +520,7 @@ export function apply(ctx: Context, config: Config): void {
       apiKey: (config.apiKeys ?? [])[0] ?? endpointKey,
       apiKeysConfigured: (config.apiKeys ?? []).length > 0,
       variants,
-      usage: usage.summary(),
+      usage: withNicknames(usage.summary()),
       ...importResult === undefined ? {} : { importResult },
     }
   }
@@ -753,7 +765,7 @@ export function apply(ctx: Context, config: Config): void {
 
       // 用量：面板轮询时直接给现成的桶，不重扫流水文件。
       mount(`${ROUTE_PREFIX}/usage`, async (_req, res) => {
-        json(res, 200, { ok: true, usage: usage.summary(), document: panelDocument() })
+        json(res, 200, { ok: true, usage: withNicknames(usage.summary()), document: panelDocument() })
       })
 
       mount(`${ROUTE_PREFIX}/usage/clear`, async (_req, res) => {

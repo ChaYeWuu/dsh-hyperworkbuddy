@@ -193,7 +193,7 @@ export function clientUserAgent(credential: WorkBuddyCredential, clientVersion?:
  * 归一化 chat 请求体。
  *
  * 上游只接受流式；`tool_choice` 必须是字符串；`role: 'developer'` 要改写成
- * `system`；国际版额外要求首条为 system。
+ * `system`；`reasoning_effort: 'off'` 要删掉（见下）；国际版额外要求首条为 system。
  *
  * @param raw - 原始 JSON 字符串。
  * @param region - 目标区域。
@@ -220,8 +220,10 @@ export function prepareChatBody(raw: string, region: 'cn' | 'global'): string {
       : undefined
     body['tool_choice'] = typeof name === 'string' ? 'required' : 'auto'
   }
+  // `off` 是适配器自造拼写，上游档位词表里没有它：国内版与国际版实测都回 400
+  // 「模型不支持该思考强度」。省略该字段即走上游默认档，是两区都被接受的形态。
+  if (body['reasoning_effort'] === 'off') delete body['reasoning_effort']
   if (region === 'global') {
-    if (body['reasoning_effort'] === 'off') delete body['reasoning_effort']
     const first = messages[0]
     if (first === undefined || first['role'] !== 'system') {
       messages.unshift({ role: 'system', content: 'You are a helpful assistant.' })

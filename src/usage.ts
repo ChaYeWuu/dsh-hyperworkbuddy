@@ -60,8 +60,8 @@ export interface UsageSummary {
   today: UsageTotals
   /** 缓存命中率（0–1）；没有输入 token 时为 undefined。 */
   cacheHitRate?: number
-  /** 今日分账号。 */
-  byAccount: { account: string; variantId: string; totals: UsageTotals }[]
+  /** 今日分账号；`nickname` 由 host 侧用账号池补齐，流水本身只记 id。 */
+  byAccount: { account: string; nickname?: string; variantId: string; totals: UsageTotals }[]
   /** 今日分模型。 */
   byModel: { model: string; totals: UsageTotals }[]
   /** 近 7 天，按日期升序。 */

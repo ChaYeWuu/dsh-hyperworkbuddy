@@ -367,7 +367,7 @@ interface PanelUsage {
   all: PanelTotals
   today: PanelTotals
   cacheHitRate?: number
-  byAccount: { account: string; variantId: string; totals: PanelTotals }[]
+  byAccount: { account: string; nickname?: string; variantId: string; totals: PanelTotals }[]
   byModel: { model: string; totals: PanelTotals }[]
   daily: { day: string; totals: PanelTotals }[]
 }
@@ -980,7 +980,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
       h('div', { style: S.statLabel }, label),
       h('div', { style: S.statValue }, value),
     )
-    const table = (title: string, rows: { name: string; totals: PanelTotals }[]): unknown => rows.length === 0
+    const table = (title: string, rows: { name: string; hint?: string; totals: PanelTotals }[]): unknown => rows.length === 0
       ? null
       : h('div', { style: { marginTop: '10px' } },
         h('div', { style: S.statLabel }, title),
@@ -992,7 +992,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
             h('th', { style: S.usageTh }, t('usageCompletion')),
           )),
           h('tbody', null, rows.map(row => h('tr', { key: row.name },
-            h('td', { style: { ...S.usageTd, ...S.mono, maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis' } }, row.name),
+            h('td', { style: { ...S.usageTd, ...S.mono, maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis' }, title: row.hint }, row.name),
             h('td', { style: S.usageTd }, `${row.totals.requests}${row.totals.errors === 0 ? '' : ` (${row.totals.errors} ✗)`}`),
             h('td', { style: S.usageTd }, formatTokens(row.totals.promptTokens)),
             h('td', { style: S.usageTd }, formatTokens(row.totals.completionTokens)),
@@ -1055,7 +1055,11 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
         ? h('p', { style: { ...S.sub, marginTop: '10px' } }, t('usageEmpty'))
         : null,
 
-      table(t('usageByAccount'), usage.byAccount.map(row => ({ name: row.account, totals: row.totals }))),
+      table(t('usageByAccount'), usage.byAccount.map(row => ({
+        name: row.nickname ?? row.account,
+        hint: row.nickname === undefined ? undefined : row.account,
+        totals: row.totals,
+      }))),
       table(t('usageByModel'), usage.byModel.map(row => ({ name: row.model, totals: row.totals }))),
 
       h('p', { style: { ...S.sub, marginTop: '10px' } }, t('usageHint')),
