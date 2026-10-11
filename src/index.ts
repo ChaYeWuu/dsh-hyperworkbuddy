@@ -28,6 +28,7 @@ import { parseHubExport } from './import.ts'
 import { createHyperShim, type HyperShim } from './shim.ts'
 import { PluginState } from './state.ts'
 import { checkin, pollLogin, probeEfforts, startLogin } from './upstream.ts'
+import { UsageLedger, type UsageSummary } from './usage.ts'
 import { WORKBUDDY_VARIANTS, variantFor, type WorkBuddyVariant } from './variants.ts'
 
 /** Cordis 插件名。 */
@@ -153,6 +154,8 @@ interface PanelDocument {
   apiKey: string
   apiKeysConfigured: boolean
   variants: PanelVariant[]
+  /** 请求用量汇总。 */
+  usage: UsageSummary
   /** 仅在导入请求的响应里出现。 */
   importResult?: ImportResult
 }
@@ -219,6 +222,7 @@ export function apply(ctx: Context, config: Config): void {
   const resolvedHome = homeDir === '' ? process.cwd() : homeDir
   const pool = new AccountPool(resolvedHome)
   const state = new PluginState(resolvedHome, { endpointEnabled: config.endpointEnabled !== false })
+  const usage = new UsageLedger(resolvedHome)
 
   let stopped = false
   let endpointKey = ''
@@ -321,6 +325,7 @@ export function apply(ctx: Context, config: Config): void {
     await migrateLegacyState()
     await state.load()
     await pool.load()
+    await usage.load()
     endpointKey = await ensureEndpointKey(resolvedHome)
     if (config.followDesktop !== false) {
       await pool.refreshFromDesktop()
@@ -459,6 +464,7 @@ export function apply(ctx: Context, config: Config): void {
       apiKey: (config.apiKeys ?? [])[0] ?? endpointKey,
       apiKeysConfigured: (config.apiKeys ?? []).length > 0,
       variants,
+      usage: usage.summary(),
       ...importResult === undefined ? {} : { importResult },
     }
   }
@@ -486,6 +492,7 @@ export function apply(ctx: Context, config: Config): void {
         port: () => portFor(variant),
         // 对外端点不做隐藏过滤：隐藏只影响 DSH 选择器，外部客户端应拿到完整目录。
         hiddenModels: () => [],
+        usage,
         logger: ctx.logger,
       })
       await shim.ready
@@ -518,6 +525,7 @@ export function apply(ctx: Context, config: Config): void {
         // 随机端口：它是实现细节，不占用户配置的端口，也不对外暴露固定入口。
         port: () => 0,
         hiddenModels: () => [],
+        usage,
         logger: ctx.logger,
       })
       await shim.ready
@@ -671,6 +679,16 @@ export function apply(ctx: Context, config: Config): void {
         const result = await pool.refreshAllCatalogs()
         invalidate()
         json(res, 200, { ok: true, ...result, document: panelDocument() })
+      })
+
+      // 用量：面板轮询时直接给现成的桶，不重扫流水文件。
+      mount(`${ROUTE_PREFIX}/usage`, async (_req, res) => {
+        json(res, 200, { ok: true, usage: usage.summary(), document: panelDocument() })
+      })
+
+      mount(`${ROUTE_PREFIX}/usage/clear`, async (_req, res) => {
+        await usage.clear()
+        json(res, 200, { ok: true, document: panelDocument() })
       })
 
       // 某个版本的一键刷新：只刷该版本的账号，目录 + 积分一起刷

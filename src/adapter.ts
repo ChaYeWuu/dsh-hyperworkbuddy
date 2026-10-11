@@ -104,7 +104,9 @@ function toPiModel(info: UpstreamModel, baseUrl: string, providerId: string, pro
     contextWindow: info.contextWindow,
     maxTokens: info.maxTokens,
     // pi-ai 无法从回环地址推断 WorkBuddy 的字段拼写，这里显式点名。
-    compat: { maxTokensField: 'max_tokens' },
+    // sendSessionAffinityHeaders 让 pi-ai 把 sessionId 转成 x-session-id 等头，
+    // 回环 shim 靠它做会话粘性选号（非 OpenRouter 的 baseUrl 默认关闭）。
+    compat: { maxTokensField: 'max_tokens', sendSessionAffinityHeaders: true },
   } as unknown as Model<Api>
 }
 

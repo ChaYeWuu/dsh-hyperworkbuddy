@@ -8,6 +8,7 @@ package-lock.json
 
 # 调研产物
 .probe/
+.probe-asar/
 .probe020/
 .research/
 workbuddy-upstream-protocol-spec.md

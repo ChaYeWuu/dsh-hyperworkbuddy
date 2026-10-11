@@ -121,6 +121,23 @@ const zh = {
   reasoningNone: '未声明',
   reasoningProbeHint: '上游未声明档位时可手动探测：逐个档位发一条最小请求，只采纳上游接受的档位。会消耗少量额度。',
 
+  usageSection: '用量',
+  usageToday: '今日',
+  usageAll: '累计',
+  usageRequests: '请求',
+  usageErrors: '失败',
+  usagePrompt: '输入',
+  usageCompletion: '输出',
+  usageCacheRate: '缓存命中率',
+  usageDaily: '近 7 天',
+  usageByAccount: '今日分账号',
+  usageByModel: '今日分模型',
+  usageEmpty: '还没有请求记录。',
+  usageClear: '清空记录',
+  usageClearConfirm: '确认清空',
+  usageClearDone: '用量记录已清空',
+  usageHint: '统计来自本插件的两个回环端点（DSH 自身与外部客户端），只记在本机。',
+
   loading: '加载中…',
   loadFailed: '加载失败',
   retry: '重试',
@@ -226,6 +243,23 @@ const en: typeof zh = {
   reasoningNone: 'not declared',
   reasoningProbeHint: 'When the upstream declares no levels, probe them: one minimal request per level, keeping only the accepted ones. Consumes a little credit.',
 
+  usageSection: 'Usage',
+  usageToday: 'Today',
+  usageAll: 'All time',
+  usageRequests: 'Requests',
+  usageErrors: 'Failed',
+  usagePrompt: 'Input',
+  usageCompletion: 'Output',
+  usageCacheRate: 'Cache hit rate',
+  usageDaily: 'Last 7 days',
+  usageByAccount: 'Today by account',
+  usageByModel: 'Today by model',
+  usageEmpty: 'No requests recorded yet.',
+  usageClear: 'Clear',
+  usageClearConfirm: 'Confirm clear',
+  usageClearDone: 'Usage records cleared',
+  usageHint: 'Counted from this plugin\u2019s two loopback endpoints (DSH itself and external clients), stored on this machine only.',
+
   loading: 'Loading…',
   loadFailed: 'Failed to load',
   retry: 'Retry',
@@ -296,6 +330,26 @@ interface PanelVariant {
   desktopError: string
 }
 
+/** 一组累计值。 */
+interface PanelTotals {
+  requests: number
+  errors: number
+  promptTokens: number
+  completionTokens: number
+  cachedTokens: number
+  totalTokens: number
+}
+
+/** 面板用量汇总，与 host 的 `UsageSummary` 一一对应。 */
+interface PanelUsage {
+  all: PanelTotals
+  today: PanelTotals
+  cacheHitRate?: number
+  byAccount: { account: string; variantId: string; totals: PanelTotals }[]
+  byModel: { model: string; totals: PanelTotals }[]
+  daily: { day: string; totals: PanelTotals }[]
+}
+
 /** 面板状态文档。 */
 interface PanelDocument {
   ok: true
@@ -303,6 +357,7 @@ interface PanelDocument {
   apiKey: string
   apiKeysConfigured: boolean
   variants: PanelVariant[]
+  usage: PanelUsage
   importResult?: { imported: number; skipped: { index: number; reason: string }[]; error: string }
 }
 
@@ -382,6 +437,14 @@ function formatDuration(ms: number): string {
   return `${Math.ceil(minutes / 60)}h`
 }
 
+/** 把 token 数压成人一眼能比的大小。 */
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
+  return `${(n / 1_000_000).toFixed(2)}M`
+}
+
 const S = {
   root: { display: 'flex', flexDirection: 'column', gap: '18px', padding: '4px 0 24px', fontSize: '13px' },
   h1: { fontSize: '16px', fontWeight: 600, margin: 0 },
@@ -434,6 +497,22 @@ const S = {
   },
   caret: { fontSize: '11px', width: '12px', display: 'inline-block', textAlign: 'center' as const },
   pkgRow: { display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '12px', padding: '1px 0' },
+  statGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '8px' },
+  statCell: { border: '1px solid var(--dsw-alias-border-l2, #3333)', borderRadius: '8px', padding: '8px 10px' },
+  statLabel: { color: 'var(--dsw-alias-label-secondary, #888)', fontSize: '11px' },
+  statValue: { fontSize: '15px', fontWeight: 600, marginTop: '2px' },
+  barTrack: { display: 'flex', alignItems: 'flex-end', gap: '4px', height: '52px', marginTop: '8px' },
+  barColumn: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', height: '100%', justifyContent: 'flex-end' },
+  bar: {
+    width: '100%', background: 'var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4a7dff)',
+    borderRadius: '3px 3px 0 0', opacity: 0.65, minHeight: '2px',
+  },
+  usageTable: { width: '100%', borderCollapse: 'collapse' as const, fontSize: '12px', marginTop: '6px' },
+  usageTh: {
+    textAlign: 'left' as const, color: 'var(--dsw-alias-label-secondary, #888)', fontWeight: 500,
+    fontSize: '11px', padding: '2px 8px 2px 0',
+  },
+  usageTd: { padding: '2px 8px 2px 0', whiteSpace: 'nowrap' as const },
 }
 
 /**
@@ -492,6 +571,8 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
   const [form, setForm] = useState({ variantId: '', accessToken: '', uid: '', enterpriseId: '', nickname: '' })
   const [hubText, setHubText] = useState('')
   const [notice, setNotice] = useState('')
+  /** 用量「清空记录」的二次确认态。 */
+  const [clearArmed, setClearArmed] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -807,6 +888,97 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
     )
   }
 
+  /** 用量看板：今日汇总 + 近 7 天柱状 + 分账号/分模型两张小表。 */
+  const usageSection = (usage: PanelUsage | undefined): unknown => {
+    if (usage === undefined) return null
+    const today = usage.today
+    const maxDaily = Math.max(1, ...usage.daily.map(d => d.totals.totalTokens))
+    const cell = (label: string, value: string): unknown => h('div', { style: S.statCell },
+      h('div', { style: S.statLabel }, label),
+      h('div', { style: S.statValue }, value),
+    )
+    const table = (title: string, rows: { name: string; totals: PanelTotals }[]): unknown => rows.length === 0
+      ? null
+      : h('div', { style: { marginTop: '10px' } },
+        h('div', { style: S.statLabel }, title),
+        h('table', { style: S.usageTable },
+          h('thead', null, h('tr', null,
+            h('th', { style: S.usageTh }, ''),
+            h('th', { style: S.usageTh }, t('usageRequests')),
+            h('th', { style: S.usageTh }, t('usagePrompt')),
+            h('th', { style: S.usageTh }, t('usageCompletion')),
+          )),
+          h('tbody', null, rows.map(row => h('tr', { key: row.name },
+            h('td', { style: { ...S.usageTd, ...S.mono, maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis' } }, row.name),
+            h('td', { style: S.usageTd }, `${row.totals.requests}${row.totals.errors === 0 ? '' : ` (${row.totals.errors} ✗)`}`),
+            h('td', { style: S.usageTd }, formatTokens(row.totals.promptTokens)),
+            h('td', { style: S.usageTd }, formatTokens(row.totals.completionTokens)),
+          ))),
+        ),
+      )
+
+    return h('div', { style: S.card, key: 'usage' },
+      h('div', { style: { ...S.cardTitle, justifyContent: 'space-between' } },
+        h('span', null, t('usageSection')),
+        h('div', { style: S.row },
+          h('span', { style: S.badge }, t('usageAll')),
+          h('span', { style: { ...S.muted, ...S.mono } },
+            `${usage.all.requests} ${t('usageRequests').toLowerCase()} · ${formatTokens(usage.all.totalTokens)}`),
+          // 两步确认：清空不可逆，不给一键误触的机会。
+          clearArmed
+            ? actionButton('usageClear', t('usageClearConfirm'), () => {
+              setClearArmed(false)
+              setBusy('usageClear')
+              void (async () => {
+                try {
+                  await postDocument('/usage/clear', {})
+                  setNotice(t('usageClearDone'))
+                  setError('')
+                  await load()
+                } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
+              })()
+            }, t('working'))
+            : h('button', { style: S.btn, onClick: () => setClearArmed(true) }, t('usageClear')),
+        ),
+      ),
+
+      h('div', { style: S.statGrid },
+        cell(t('usageRequests'), String(today.requests)),
+        cell(t('usagePrompt'), formatTokens(today.promptTokens)),
+        cell(t('usageCompletion'), formatTokens(today.completionTokens)),
+        cell(t('usageCacheRate'), usage.cacheHitRate === undefined
+          ? '—'
+          : `${Math.round(usage.cacheHitRate * 100)}%`),
+      ),
+
+      h('div', { style: { marginTop: '12px' } },
+        h('div', { style: S.statLabel }, t('usageDaily')),
+        h('div', { style: S.barTrack }, usage.daily.map(day => h('div', {
+          key: day.day,
+          style: S.barColumn,
+          title: `${day.day} · ${day.totals.requests} · ${day.totals.totalTokens}`,
+        },
+          h('div', {
+            style: {
+              ...S.bar,
+              height: `${Math.max(2, Math.round((day.totals.totalTokens / maxDaily) * 100))}%`,
+            },
+          }),
+          h('span', { style: { ...S.statLabel, fontSize: '10px' } }, day.day.slice(5)),
+        ))),
+      ),
+
+      today.requests === 0 && usage.all.requests === 0
+        ? h('p', { style: { ...S.sub, marginTop: '10px' } }, t('usageEmpty'))
+        : null,
+
+      table(t('usageByAccount'), usage.byAccount.map(row => ({ name: row.account, totals: row.totals }))),
+      table(t('usageByModel'), usage.byModel.map(row => ({ name: row.model, totals: row.totals }))),
+
+      h('p', { style: { ...S.sub, marginTop: '10px' } }, t('usageHint')),
+    )
+  }
+
   return h('div', { style: S.root },
     h('div', null,
       h('h1', { style: S.h1 }, t('title')),
@@ -905,6 +1077,9 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
 
     // 版本分区
     doc.variants.map(variantSection),
+
+    // 用量看板
+    usageSection(doc.usage),
 
     // 账号导入
     h('div', { style: S.card },

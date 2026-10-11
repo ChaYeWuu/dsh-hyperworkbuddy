@@ -15,6 +15,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { Readable } from 'node:stream'
 import { AccountPool, toCredential, type PoolAccount } from './accounts.ts'
 import { chatCompletions, modelOfBody, type ChatResult, type UpstreamErrorKind } from './upstream.ts'
+import { createUsageTap, readUsageBlock, type UsageFields, type UsageLedger } from './usage.ts'
 
 /** 插件上下文里可用的最小日志接口。 */
 export interface ShimLogger {
@@ -50,6 +51,8 @@ export interface HyperShimOptions {
   port: () => number
   /** 模型可见性：该账号被隐藏的模型 id。 */
   hiddenModels: () => string[]
+  /** 请求流水；省略则不记账。 */
+  usage?: UsageLedger
   logger?: ShimLogger
 }
 
@@ -252,16 +255,22 @@ export function createHyperShim(options: HyperShimOptions): HyperShim {
     const controller = new AbortController()
     req.on('close', () => controller.abort())
 
+    const sessionKey = sessionKeyOf(req)
+    const startedAtMs = Date.now()
     let last: { status: number; kind: UpstreamErrorKind; message: string } | undefined
     const tried = new Set<string>()
     for (let attempt = 0; attempt < candidates.length; attempt++) {
-      const account = pickAccount(candidates, tried)
+      const account = pickAccount(candidates, tried, sessionKey)
       if (account === undefined) break
       tried.add(`${account.account}|${account.variantId}`)
       const result: ChatResult = await chatCompletions(toCredential(account), raw, controller.signal)
       if (result.ok) {
         pool.noteSuccess(account.account, account.variantId)
-        await streamThrough(res, result.response, controller)
+        // 成功了才建立亲和：失败账号对这段会话不合适，绑上去只会让每个请求先撞墙。
+        pool.bindSession(sessionKey, account.account, account.variantId)
+        await streamThrough(res, result.response, controller, {
+          variantId, account: account.account, model, startedAtMs,
+        })
         return
       }
       last = { status: result.status, kind: result.kind, message: result.message }
@@ -280,23 +289,72 @@ export function createHyperShim(options: HyperShimOptions): HyperShim {
       writeOpenAIError(res, 503, 'no_account', '没有可用账号')
       return
     }
+    await options.usage?.record({
+      atMs: startedAtMs,
+      variantId,
+      account: '',
+      model,
+      ok: false,
+      kind: last.kind,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+      totalTokens: 0,
+      elapsedMs: Date.now() - startedAtMs,
+    })
     writeOpenAIError(res, KIND_STATUS[last.kind], last.kind, `全部账号均失败，最后一个错误：${last.message}`)
   }
 
-  /** 在候选里选一个还没试过的账号，优先使用次数最少的。 */
-  function pickAccount(candidates: PoolAccount[], tried: Set<string>): PoolAccount | undefined {
+  /**
+   * 取出请求里的会话标识。
+   *
+   * pi-ai 在 `compat.sendSessionAffinityHeaders` 打开时会把这些头都发出来，
+   * 取任意一个都指向同一个会话；外部客户端通常一个都不带，那就退化成纯轮转。
+   */
+  function sessionKeyOf(req: IncomingMessage): string {
+    for (const name of ['x-session-id', 'session_id', 'x-session-affinity', 'x-client-request-id'] as const) {
+      const value = req.headers[name]
+      if (typeof value === 'string' && value.trim() !== '') return value.trim()
+    }
+    return ''
+  }
+
+  /**
+   * 在候选里选一个还没试过的账号。
+   *
+   * 优先复用该会话已绑定的账号（上游 prompt cache 按账号隔离，换号等于把整段
+   * 对话的缓存作废）；绑定账号不可用时退回「使用次数最少」，保证失败后能换号。
+   */
+  function pickAccount(
+    candidates: PoolAccount[],
+    tried: Set<string>,
+    sessionKey: string,
+  ): PoolAccount | undefined {
     const fresh = candidates.filter(a => !tried.has(`${a.account}|${a.variantId}`))
     if (fresh.length === 0) return undefined
+    if (sessionKey !== '') {
+      const bound = pool.sessionBinding(sessionKey)
+      if (bound !== undefined) {
+        const pinned = fresh.find(a => a.account === bound.account && a.variantId === bound.variantId)
+        if (pinned !== undefined) return pinned
+      }
+    }
     const minUsed = Math.min(...fresh.map(a => a.lastUsedAtMs))
     return fresh.filter(a => a.lastUsedAtMs === minUsed)[0]
   }
 
-  /** 把上游 SSE 原样转发；断流时补一个 [DONE]。 */
+  /** 把上游 SSE 原样转发；断流时补一个 [DONE]，顺手把 usage 记成流水。 */
   async function streamThrough(
     res: ServerResponse,
     upstream: Response,
     controller: AbortController,
+    context: { variantId: string; account: string; model: string; startedAtMs: number },
   ): Promise<void> {
+    const contentType = upstream.headers.get('content-type') ?? ''
+    if (!contentType.includes('text/event-stream')) {
+      await relayJson(res, upstream, context)
+      return
+    }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -308,19 +366,73 @@ export function createHyperShim(options: HyperShimOptions): HyperShim {
       return
     }
     let sawDone = false
+    // 正常结束与用户中断都会走到，只能记一次。
+    let recorded = false
+    const tap = createUsageTap()
+    const flush = (): void => {
+      if (recorded) return
+      recorded = true
+      void recordUsage(context, tap.usage(), Date.now() - context.startedAtMs)
+    }
     const body = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0])
     body.on('data', (chunk: Buffer) => {
       if (chunk.includes('[DONE]')) sawDone = true
+      tap.feed(chunk)
     })
     body.on('error', (error: unknown) => {
       logger?.warn('hyperworkbuddy: 上游流中途失败', error)
       if (!sawDone && res.writable) res.end('data: [DONE]\n\n')
+      flush()
     })
+    body.on('end', flush)
     controller.signal.addEventListener('abort', () => {
       body.destroy()
       if (!res.writableEnded) res.end()
+      // 用户中断也要记账：上游已经算过的输入 token 不会因为本地取消退回来。
+      flush()
     }, { once: true })
     body.pipe(res)
+  }
+
+  /** 非 SSE 响应：整体缓冲后原样回写。 */
+  async function relayJson(
+    res: ServerResponse,
+    upstream: Response,
+    context: { variantId: string; account: string; model: string; startedAtMs: number },
+  ): Promise<void> {
+    const text = upstream.body === null ? '' : await new Response(upstream.body).text()
+    let usage: UsageFields | undefined
+    try {
+      usage = readUsageBlock((JSON.parse(text) as Record<string, unknown>)['usage'])
+    } catch {
+      usage = undefined
+    }
+    await recordUsage(context, usage, Date.now() - context.startedAtMs)
+    res.writeHead(upstream.status, {
+      'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
+      'Content-Length': Buffer.byteLength(text),
+    })
+    res.end(text)
+  }
+
+  /** 记一条成功流水；没有 usage 也记一行，否则「请求数」会漏掉这些调用。 */
+  async function recordUsage(
+    context: { variantId: string; account: string; model: string; startedAtMs: number },
+    usage: UsageFields | undefined,
+    elapsedMs: number,
+  ): Promise<void> {
+    await options.usage?.record({
+      atMs: context.startedAtMs,
+      variantId: context.variantId,
+      account: context.account,
+      model: context.model,
+      ok: true,
+      promptTokens: usage?.promptTokens ?? 0,
+      completionTokens: usage?.completionTokens ?? 0,
+      cachedTokens: usage?.cachedTokens ?? 0,
+      totalTokens: usage?.totalTokens ?? 0,
+      elapsedMs,
+    })
   }
 
   return {

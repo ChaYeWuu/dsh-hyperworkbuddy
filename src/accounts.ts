@@ -128,6 +128,9 @@ export async function resetEndpointKey(homeDir: string, custom?: string): Promis
 const COOLDOWN_BASE_MS = 60_000
 const COOLDOWN_MAX_MS = 3_600_000
 
+/** 会话亲和表上限；超出后保留最近一半，避免长跑进程内存无界增长。 */
+const STICKY_MAX_ENTRIES = 4096
+
 /**
  * 积分缓存有效期。
  *
@@ -257,7 +260,7 @@ function fromCredential(credential: WorkBuddyCredential, source: PoolAccount['so
  * 账号池。
  *
  * 选取策略：过滤掉停用、冷却中与凭据缺失的账号，在剩余账号里按
- * 「最少使用 + 轮转」挑选，同一账号失败即进入指数冷却并立刻换下一个。
+ * 「会话亲和 → 最少使用 + 轮转」挑选，同一账号失败即进入指数冷却并立刻换下一个。
  */
 export class AccountPool {
   private accounts: PoolAccount[] = []
@@ -266,6 +269,13 @@ export class AccountPool {
   private cursor = 0
   /** 最近一次刷新错误，供面板展示。 */
   private lastRefreshError = ''
+  /**
+   * 会话亲和表：会话键 → `账号|变体`。
+   *
+   * 上游的 prompt cache 是按账号隔离的，同一段对话中途换号会把已有缓存全部作废。
+   * 所以一旦某个会话在某个账号上成功过，后续请求就尽量留在那个账号上。
+   */
+  private readonly sticky = new Map<string, string>()
 
   constructor(homeDir: string) {
     this.path = accountsPath(homeDir)
@@ -407,20 +417,55 @@ export class AccountPool {
   /**
    * 选一个账号并推进轮转游标。
    *
-   * 在可用账号里按「使用次数最少」优先，同档次按游标轮转，避免把负载全压在
-   * 一个账号上。
+   * 有会话键且该会话已绑定过账号时优先复用绑定；绑定的账号不可用（冷却、停用、
+   * 凭据缺失）就退回「使用次数最少 + 游标轮转」，避免把负载全压在一个账号上。
    *
    * @param variantId - 限定变体；省略表示全部。
+   * @param sessionKey - 会话标识；省略表示不做亲和。
    * @returns 选中的账号，没有可用账号时为 undefined。
    */
-  acquire(variantId?: string): PoolAccount | undefined {
+  acquire(variantId?: string, sessionKey?: string): PoolAccount | undefined {
     const candidates = this.available(variantId)
     if (candidates.length === 0) return undefined
+    if (sessionKey !== undefined && sessionKey !== '') {
+      const bound = this.sticky.get(sessionKey)
+      const pinned = candidates.find(a => `${a.account}|${a.variantId}` === bound)
+      if (pinned !== undefined) return pinned
+    }
     const minUsed = Math.min(...candidates.map(a => a.lastUsedAtMs))
     const tier = candidates.filter(a => a.lastUsedAtMs === minUsed)
     const picked = tier[this.cursor % tier.length]!
     this.cursor = (this.cursor + 1) % Math.max(1, candidates.length)
     return picked
+  }
+
+  /**
+   * 记住某个会话落在哪个账号上。
+   *
+   * 只在请求成功时绑定：失败换号说明这个账号对这段会话不合适，绑定它只会让
+   * 后续每个请求都先撞一次墙。
+   *
+   * @param sessionKey - 会话标识。
+   * @param account - 账号标识。
+   * @param variantId - 变体 id。
+   */
+  bindSession(sessionKey: string, account: string, variantId: string): void {
+    if (sessionKey === '') return
+    // 超过上限就只保留最近一半，表不随会话数无界增长。
+    if (this.sticky.size >= STICKY_MAX_ENTRIES && !this.sticky.has(sessionKey)) {
+      const entries = [...this.sticky.entries()].slice(-STICKY_MAX_ENTRIES / 2)
+      this.sticky.clear()
+      for (const [key, value] of entries) this.sticky.set(key, value)
+    }
+    this.sticky.set(sessionKey, `${account}|${variantId}`)
+  }
+
+  /** 某个会话当前绑定的账号；没有绑定时为 undefined。 */
+  sessionBinding(sessionKey: string): PoolAccount | undefined {
+    const bound = this.sticky.get(sessionKey)
+    if (bound === undefined) return undefined
+    const target = this.accounts.find(a => `${a.account}|${a.variantId}` === bound)
+    return target === undefined ? undefined : { ...target }
   }
 
   /** 记一次成功：清除冷却与失败计数。 */
