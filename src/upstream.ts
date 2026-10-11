@@ -8,6 +8,7 @@
  */
 
 import type { WorkBuddyCredential } from './auth.ts'
+import { normalizeEpoch } from './auth.ts'
 import { AI_VARIANT, CN_VARIANT, type WorkBuddyVariant } from './variants.ts'
 
 /** 上游失败分类。 */
@@ -571,6 +572,176 @@ export function parseCredits(document: unknown, enterprise: boolean): CreditSnap
     })
   }
   return { remaining, total, packages }
+}
+
+/** 登录轮询的「仍在等待」错误码。 */
+const LOGIN_PENDING = 11217
+
+/** 签到「今天已签」的错误码，视同成功。 */
+const CHECKIN_ALREADY = 10001
+
+/** 浏览器授权流程的头（与计费头不同：要带 Origin / Referer 与站点 UA）。 */
+function loginHeaders(variant: WorkBuddyVariant, token?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    'User-Agent': variant.loginUa,
+    'Origin': variant.origin,
+    'Referer': `${variant.origin}/`,
+  }
+  if (token !== undefined && token !== '') headers['Authorization'] = `Bearer ${token}`
+  return headers
+}
+
+/** 发起一次浏览器授权登录，拿到 state 与要打开的授权链接。 */
+export async function startLogin(variant: WorkBuddyVariant): Promise<{ state: string; authUrl: string }> {
+  const url = `${variant.chatBase}/v2/plugin/auth/state?platform=${encodeURIComponent('CLI')}`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: loginHeaders(variant),
+    body: '{}',
+    signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+  })
+  const envelope = await readEnvelope(response, '发起登录失败')
+  if (!response.ok || envelope.code !== 0) {
+    throw new Error(`发起登录失败（code ${envelope.code}）：${envelope.msg || `HTTP ${response.status}`}`)
+  }
+  const data = typeof envelope.data === 'object' && envelope.data !== null
+    ? envelope.data as Record<string, unknown>
+    : {}
+  const state = typeof data['state'] === 'string' ? data['state'] : ''
+  const authUrl = typeof data['authUrl'] === 'string' ? data['authUrl'] : ''
+  if (state === '' || authUrl === '') throw new Error('授权接口没有返回 state / authUrl')
+  return { state, authUrl }
+}
+
+/** 一次登录轮询的结果。 */
+export type LoginPoll =
+  | { status: 'pending'; message: string }
+  | { status: 'ok'; credential: WorkBuddyCredential }
+  | { status: 'error'; message: string }
+
+/**
+ * 轮询一次登录结果。
+ *
+ * 上游在用户尚未完成授权时回 `code = 11217`，此时不算失败。拿到 accessToken 后
+ * 再查一次账号资料取昵称（查不到不影响登录本身）。
+ *
+ * @param variant - 目标变体。
+ * @param state - `startLogin` 返回的 state。
+ * @returns 轮询结果。
+ */
+export async function pollLogin(variant: WorkBuddyVariant, state: string): Promise<LoginPoll> {
+  const url = `${variant.chatBase}/v2/plugin/auth/token?state=${encodeURIComponent(state)}`
+  let envelope: Envelope
+  try {
+    const response = await fetch(url, { method: 'GET', headers: loginHeaders(variant), signal: AbortSignal.timeout(JSON_TIMEOUT_MS) })
+    envelope = await readEnvelope(response, '登录轮询失败')
+  } catch (error: unknown) {
+    // 轮询期间的网络抖动按「仍在等待」处理，不打断整个流程。
+    return { status: 'pending', message: `轮询出错：${String(error)}` }
+  }
+  if (envelope.code === LOGIN_PENDING) {
+    return { status: 'pending', message: envelope.msg || '等待浏览器完成授权' }
+  }
+  if (envelope.code !== 0) {
+    return { status: 'error', message: `code ${envelope.code}：${envelope.msg || '上游未说明原因'}` }
+  }
+  const data = typeof envelope.data === 'object' && envelope.data !== null
+    ? envelope.data as Record<string, unknown>
+    : {}
+  const accessToken = typeof data['accessToken'] === 'string' ? data['accessToken'] : ''
+  if (accessToken === '') return { status: 'pending', message: '等待令牌下发' }
+
+  const uid = jwtUid(accessToken)
+  const nickname = await fetchLoginNickname(variant, state, accessToken).catch(() => '')
+  const enterpriseId = typeof data['enterpriseId'] === 'string' ? data['enterpriseId'] : ''
+  return {
+    status: 'ok',
+    credential: {
+      variantId: variant.id,
+      account: `${uid}:${enterpriseId}`,
+      uid,
+      enterpriseId,
+      domain: typeof data['domain'] === 'string' && data['domain'] !== '' ? data['domain'] : variant.origin.replace('https://', ''),
+      nickname,
+      accessToken,
+      refreshToken: typeof data['refreshToken'] === 'string' ? data['refreshToken'] : '',
+      expiresAtMs: normalizeEpoch(data['expiresAt']),
+      refreshExpiresAtMs: 0,
+    },
+  }
+}
+
+/** 取登录账号的昵称；失败返回空串。 */
+async function fetchLoginNickname(variant: WorkBuddyVariant, state: string, token: string): Promise<string> {
+  const url = `${variant.chatBase}/v2/plugin/login/account?state=${encodeURIComponent(state)}`
+  const response = await fetch(url, { method: 'GET', headers: loginHeaders(variant, token), signal: AbortSignal.timeout(JSON_TIMEOUT_MS) })
+  const text = await response.text()
+  const parsed = JSON.parse(text) as Record<string, unknown>
+  const data = typeof parsed['data'] === 'object' && parsed['data'] !== null
+    ? parsed['data'] as Record<string, unknown>
+    : {}
+  return typeof data['nickname'] === 'string' ? data['nickname'] : ''
+}
+
+/** 从 JWT 里取 uid；解不开返回空串。 */
+function jwtUid(token: string): string {
+  const segments = token.split('.')
+  if (segments.length !== 3) return ''
+  try {
+    const payload = JSON.parse(Buffer.from(segments[1]!, 'base64url').toString('utf8')) as Record<string, unknown>
+    for (const key of ['uid', 'sub', 'user_id', 'userId']) {
+      const value = payload[key]
+      if (typeof value === 'string' && value !== '') return value
+    }
+  } catch {
+    // 解不开就不给 uid
+  }
+  return ''
+}
+
+/** 每日签到结果。 */
+export interface CheckinResult {
+  ok: boolean
+  code: number
+  message: string
+}
+
+/**
+ * 国内版每日签到。
+ *
+ * `code === 10001` 表示今天已经签过，同样按成功处理。
+ *
+ * @param credential - 目标凭据（必须是国内版）。
+ * @returns 签到结果。
+ */
+export async function checkin(credential: WorkBuddyCredential): Promise<CheckinResult> {
+  const variant = variantOfCredential(credential)
+  if (variant.region !== 'cn') {
+    return { ok: false, code: -1, message: '签到只有国内版账号支持' }
+  }
+  const response = await fetch(`${variant.billingBase}/v2/billing/meter/daily-checkin`, {
+    method: 'POST',
+    headers: billingHeaders(credential),
+    body: '{}',
+    signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+  })
+  let envelope: Envelope
+  try {
+    envelope = await readEnvelope(response, '签到失败')
+  } catch (error: unknown) {
+    return { ok: false, code: -1, message: String(error) }
+  }
+  const ok = envelope.code === 0 || envelope.code === CHECKIN_ALREADY
+  return {
+    ok,
+    code: envelope.code,
+    message: envelope.msg !== ''
+      ? envelope.msg
+      : ok ? '签到成功' : `HTTP ${response.status}`,
+  }
 }
 
 /** 刷新 access token。 */

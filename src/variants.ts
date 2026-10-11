@@ -28,6 +28,12 @@ export interface WorkBuddyVariant {
   chatBase: string
   /** 上游计费基地址。 */
   billingBase: string
+  /** 浏览器授权页与 Referer 使用的站点源。 */
+  origin: string
+  /** 登录 / 计费接口使用的 User-Agent。 */
+  loginUa: string
+  /** 该版本是否支持每日签到（只有国内版有成长体系）。 */
+  hasCheckin: boolean
   /** 默认客户端版本，用于 User-Agent 兜底。 */
   defaultClientVersion: string
 }
@@ -43,6 +49,9 @@ export const WORKBUDDY_VARIANTS: readonly WorkBuddyVariant[] = [
     desktopFilename: 'workbuddy-desktop.info',
     chatBase: 'https://copilot.tencent.com',
     billingBase: 'https://www.codebuddy.cn',
+    origin: 'https://www.codebuddy.cn',
+    loginUa: 'WorkBuddy/5.5.6',
+    hasCheckin: true,
     defaultClientVersion: '5.5.6',
   },
   {
@@ -54,6 +63,9 @@ export const WORKBUDDY_VARIANTS: readonly WorkBuddyVariant[] = [
     desktopFilename: 'workbuddy-desktop-ai.info',
     chatBase: 'https://www.workbuddy.ai',
     billingBase: 'https://www.workbuddy.ai',
+    origin: 'https://www.workbuddy.ai',
+    loginUa: 'WorkBuddy/5.5.2',
+    hasCheckin: false,
     defaultClientVersion: '5.5.2',
   },
 ]

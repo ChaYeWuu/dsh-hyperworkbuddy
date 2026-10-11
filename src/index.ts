@@ -15,14 +15,19 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { copyFile, mkdir, readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
-import { AccountPool, ensureEndpointKey, toCredential } from './accounts.ts'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { ACCOUNTS_FILENAME, AccountPool, ensureEndpointKey, toCredential } from './accounts.ts'
 import { createHyperAdapter, type HyperAdapter } from './adapter.ts'
 import { parseHubExport } from './import.ts'
 import { createHyperShim, type HyperShim } from './shim.ts'
 import { PluginState } from './state.ts'
+import { checkin, pollLogin, startLogin } from './upstream.ts'
 import { WORKBUDDY_VARIANTS, variantFor, type WorkBuddyVariant } from './variants.ts'
 
 /** Cordis 插件名。 */
@@ -116,6 +121,8 @@ interface PanelVariant {
   externalRunning: boolean
   /** 对外端点启动失败原因；空串表示正常。 */
   externalError: string
+  /** 该版本是否支持每日签到（只有国内版）。 */
+  hasCheckin: boolean
   /** provider 是否已注册（与对外端点开关无关）。 */
   providerRegistered: boolean
   providerError: string
@@ -193,7 +200,17 @@ interface VariantRuntime {
  * @param config - 已解析配置。
  */
 export function apply(ctx: Context, config: Config): void {
-  const homeDir = ctx.get('dshHomePaths')?.home ?? process.env['DSH_HOME'] ?? ''
+  /**
+   * 状态文件的位置。
+   *
+   * 优先用宿主给的 home，而不是 `$DSH_HOME`：Desktop 版把 home 指到 profile
+   * 目录（`~/.dsh/profiles/desktop`），而环境变量指向 `~/.dsh`，两者不一致会让
+   * 同一份账号在重启前后落到不同文件，看起来像账号丢了。
+   */
+  const homeDir = ctx.get('dshHomePaths')?.home
+    ?? (process.env['DSH_HOME'] !== undefined && process.env['DSH_HOME'] !== ''
+      ? process.env['DSH_HOME']
+      : resolveDshHome())
   const resolvedHome = homeDir === '' ? process.cwd() : homeDir
   const pool = new AccountPool(resolvedHome)
   const state = new PluginState(resolvedHome, { endpointEnabled: config.endpointEnabled !== false })
@@ -203,6 +220,8 @@ export function apply(ctx: Context, config: Config): void {
   let pollTimer: NodeJS.Timeout | undefined
   let lastDesktopError = ''
   const runtimes = new Map<string, VariantRuntime>()
+  /** 进行中的浏览器授权登录：state → 变体 id 与起始时刻。 */
+  const pendingLogins = new Map<string, { variantId: string; startedAtMs: number }>()
 
   for (const variant of WORKBUDDY_VARIANTS) {
     runtimes.set(variant.id, {
@@ -224,8 +243,61 @@ export function apply(ctx: Context, config: Config): void {
     return variant.region === 'global' ? 8792 : 8791
   }
 
+  /** 读文本文件；迁移用。 */
+  async function readFileText(path: string): Promise<string> {
+    return await readFile(path, 'utf8')
+  }
+
+  /**
+   * 把散落在别处的旧状态文件搬过来。
+   *
+   * 历史版本把 home 解析成 `$DSH_HOME`（`~/.dsh`），而 Desktop 版实际用 profile
+   * 目录，于是同一台机器上会存在两份账号文件。这里在启动时把另一份里**更多的**
+   * 那份合并进来，避免用户的账号看起来「凭空消失」。
+   */
+  async function migrateLegacyState(): Promise<void> {
+    const candidates = [
+      // 环境变量指向的根（旧行为）
+      process.env['DSH_HOME'] === undefined || process.env['DSH_HOME'] === ''
+        ? undefined
+        : join(process.env['DSH_HOME'], ACCOUNTS_FILENAME),
+      // 默认 home
+      join(resolveDshHome(), ACCOUNTS_FILENAME),
+    ].filter((path): path is string => path !== undefined && dirname(path) !== resolvedHome)
+
+    const target = join(resolvedHome, ACCOUNTS_FILENAME)
+    let targetCount = 0
+    if (existsSync(target)) {
+      try {
+        const parsed = JSON.parse(await readFileText(target)) as { accounts?: unknown[] }
+        targetCount = Array.isArray(parsed.accounts) ? parsed.accounts.length : 0
+      } catch { targetCount = 0 }
+    }
+
+    for (const source of candidates) {
+      if (!existsSync(source)) continue
+      let sourceCount = 0
+      try {
+        const parsed = JSON.parse(await readFileText(source)) as { accounts?: unknown[] }
+        sourceCount = Array.isArray(parsed.accounts) ? parsed.accounts.length : 0
+      } catch { continue }
+      // 只在旧文件账号更多时才搬，避免用一份空文件覆盖当前数据。
+      if (sourceCount <= targetCount) continue
+      try {
+        await mkdir(dirname(target), { recursive: true })
+        await copyFile(source, `${target}.migrated-from-legacy`)
+        await copyFile(source, target)
+        ctx.logger.info(`hyperworkbuddy: 已从旧位置迁移 ${sourceCount} 个账号（${source}）`)
+        targetCount = sourceCount
+      } catch (error: unknown) {
+        ctx.logger.warn(`hyperworkbuddy: 迁移旧账号文件失败 ${String(error)}`)
+      }
+    }
+  }
+
   /** 首次装载状态与账号，并拉一次目录。 */
   async function bootstrap(): Promise<void> {
+    await migrateLegacyState()
     await state.load()
     await pool.load()
     endpointKey = await ensureEndpointKey(resolvedHome)
@@ -344,6 +416,7 @@ export function apply(ctx: Context, config: Config): void {
         port: runtime.external?.port() ?? 0,
         externalRunning: runtime.external !== undefined,
         externalError: runtime.externalError,
+        hasCheckin: variant.hasCheckin,
         providerRegistered: runtime.registered,
         providerError: runtime.error,
         accounts,
@@ -548,6 +621,122 @@ export function apply(ctx: Context, config: Config): void {
         const result = await pool.refreshAllCatalogs()
         invalidate()
         json(res, 200, { ok: true, ...result, document: panelDocument() })
+      })
+
+      // 某个版本的一键刷新：只刷该版本的账号，目录 + 积分一起刷
+      mount(`${ROUTE_PREFIX}/variant/refresh`, async (req, res) => {
+        const body = await readJsonBody(req)
+        const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
+        if (variantFor(variantId) === undefined) {
+          json(res, 400, { ok: false, error: '未知的 variantId', document: panelDocument() })
+          return
+        }
+        let catalogsOk = 0
+        let catalogsFailed = 0
+        let creditsOk = 0
+        let creditsFailed = 0
+        for (const account of pool.list().filter(a => a.variantId === variantId)) {
+          try {
+            await pool.refreshCatalog(account.account, variantId)
+            catalogsOk += 1
+          } catch { catalogsFailed += 1 }
+          try {
+            await pool.refreshCredits(account.account, variantId)
+            creditsOk += 1
+          } catch { creditsFailed += 1 }
+        }
+        invalidate()
+        json(res, 200, {
+          ok: true,
+          catalogsOk, catalogsFailed, creditsOk, creditsFailed,
+          document: panelDocument(),
+        })
+      })
+
+      // 一键签到：该版本下所有支持签到的账号各签一次
+      mount(`${ROUTE_PREFIX}/variant/checkin`, async (req, res) => {
+        const body = await readJsonBody(req)
+        const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
+        const variant = variantFor(variantId)
+        if (variant === undefined) {
+          json(res, 400, { ok: false, error: '未知的 variantId', document: panelDocument() })
+          return
+        }
+        if (!variant.hasCheckin) {
+          json(res, 200, { ok: false, error: '该版本没有签到功能', document: panelDocument() })
+          return
+        }
+        const results: { account: string; ok: boolean; message: string }[] = []
+        for (const account of pool.list().filter(a => a.variantId === variantId && !a.disabled)) {
+          try {
+            const result = await checkin(toCredential(account))
+            results.push({ account: account.account, ok: result.ok, message: result.message })
+          } catch (error: unknown) {
+            results.push({ account: account.account, ok: false, message: String(error) })
+          }
+        }
+        // 签到可能发积分，顺手刷一次积分让面板立刻反映
+        for (const account of pool.list().filter(a => a.variantId === variantId)) {
+          await pool.refreshCredits(account.account, variantId).catch(() => undefined)
+        }
+        json(res, 200, { ok: true, results, document: panelDocument() })
+      })
+
+      // 浏览器授权登录：起一次
+      mount(`${ROUTE_PREFIX}/login/start`, async (req, res) => {
+        const body = await readJsonBody(req)
+        const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
+        const variant = variantFor(variantId)
+        if (variant === undefined) {
+          json(res, 400, { ok: false, error: '未知的 variantId', document: panelDocument() })
+          return
+        }
+        try {
+          const { state, authUrl } = await startLogin(variant)
+          pendingLogins.set(state, { variantId, startedAtMs: Date.now() })
+          json(res, 200, { ok: true, state, authUrl, document: panelDocument() })
+        } catch (error: unknown) {
+          json(res, 200, { ok: false, error: String(error), document: panelDocument() })
+        }
+      })
+
+      // 浏览器授权登录：轮询结果，成功后直接入库并拉目录
+      mount(`${ROUTE_PREFIX}/login/poll`, async (req, res) => {
+        const body = await readJsonBody(req)
+        const state = typeof body['state'] === 'string' ? body['state'] : ''
+        const pending = pendingLogins.get(state)
+        if (pending === undefined) {
+          json(res, 200, { ok: false, status: 'unknown', error: '登录会话已失效，请重新发起', document: panelDocument() })
+          return
+        }
+        // 与上游一致的 10 分钟窗口。
+        if (Date.now() - pending.startedAtMs > 10 * 60 * 1000) {
+          pendingLogins.delete(state)
+          json(res, 200, { ok: false, status: 'expired', error: '登录窗口已过期，请重新发起', document: panelDocument() })
+          return
+        }
+        const variant = variantFor(pending.variantId)!
+        const poll = await pollLogin(variant, state)
+        if (poll.status === 'pending') {
+          json(res, 200, { ok: true, status: 'pending', message: poll.message, document: panelDocument() })
+          return
+        }
+        if (poll.status === 'error') {
+          json(res, 200, { ok: false, status: 'error', error: poll.message, document: panelDocument() })
+          return
+        }
+        pendingLogins.delete(state)
+        const credential = poll.credential
+        await pool.upsert(credential)
+        await pool.refreshCatalog(credential.account, credential.variantId).catch(() => undefined)
+        await pool.refreshCredits(credential.account, credential.variantId).catch(() => undefined)
+        invalidate()
+        json(res, 200, {
+          ok: true,
+          status: 'ok',
+          account: { account: credential.account, nickname: credential.nickname, uid: credential.uid },
+          document: panelDocument(),
+        })
       })
 
       // 导入 hub 导出文档（或裸数组 / 单账号 / 桌面凭据）

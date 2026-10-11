@@ -42,6 +42,21 @@ const zh = {
   endpointHint: '把地址填进 Codex / Claude Code 等客户端的 Base URL。',
 
   refresh: '重新扫描并刷新',
+  refreshVariant: '一键刷新',
+  refreshDone: '已刷新 {ok} 个账号（失败 {failed}），积分 {credits} 个',
+  refreshAllHint: '刷新该版本全部账号的模型与积分。',
+  checkinAll: '一键签到',
+  checkinDone: '签到完成：成功 {ok} / {total}',
+  externalEndpoint: '对外端点',
+  linkLogin: '链接登录',
+  linkLoginHint: '在浏览器里完成授权即可自动加账号，无需手动复制 token。',
+  linkLoginStart: '生成授权链接',
+  linkLoginOpening: '正在生成…',
+  linkLoginStep: '① 点下面的按钮在浏览器里打开授权页；② 完成登录后回到这里，插件会自动收取账号。',
+  linkLoginOpen: '打开授权页',
+  linkLoginWaiting: '等待浏览器完成授权…',
+  linkLoginOk: '已添加账号 {name}',
+  linkLoginFailed: '登录未完成',
   addAccount: '导入单个账号',
   addHint: '粘贴 accessToken 可追加单个账号。',
   importHub: '导入 hub 导出',
@@ -116,6 +131,21 @@ const en: typeof zh = {
   endpointHint: 'Use this as the Base URL in Codex / Claude Code and other clients.',
 
   refresh: 'Rescan and refresh',
+  refreshVariant: 'Refresh all',
+  refreshDone: 'Refreshed {ok} account(s) ({failed} failed), {credits} with credits',
+  refreshAllHint: 'Refresh models and credits for every account in this variant.',
+  checkinAll: 'Daily check-in',
+  checkinDone: 'Check-in: {ok} / {total} succeeded',
+  externalEndpoint: 'External endpoint',
+  linkLogin: 'Sign in via link',
+  linkLoginHint: 'Authorise in your browser and the account is added automatically — no token copying.',
+  linkLoginStart: 'Generate authorisation link',
+  linkLoginOpening: 'Generating…',
+  linkLoginStep: '① Open the authorisation page below in your browser; ② come back here once signed in — the plugin collects the account automatically.',
+  linkLoginOpen: 'Open authorisation page',
+  linkLoginWaiting: 'Waiting for the browser to finish…',
+  linkLoginOk: 'Added account {name}',
+  linkLoginFailed: 'Sign-in did not complete',
   addAccount: 'Import one account',
   addHint: 'Paste an accessToken to add a single account.',
   importHub: 'Import hub export',
@@ -222,6 +252,8 @@ interface PanelVariant {
   externalRunning: boolean
   /** 对外端点启动失败原因；空串表示正常。 */
   externalError: string
+  /** 该版本是否支持每日签到（只有国内版）。 */
+  hasCheckin: boolean
   providerRegistered: boolean
   providerError: string
   accounts: PanelAccount[]
@@ -384,7 +416,9 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
   const [copied, setCopied] = useState('')
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [openPkgs, setOpenPkgs] = useState<Record<string, boolean>>({})
-  const [openForm, setOpenForm] = useState<'' | 'single' | 'hub'>('')
+  const [openForm, setOpenForm] = useState<'' | 'single' | 'hub' | 'login'>('')
+  /** 进行中的链接登录：state 与要打开的授权页。 */
+  const [login, setLogin] = useState<{ variantId: string; state: string; authUrl: string; message: string } | undefined>(undefined)
   const [form, setForm] = useState({ variantId: '', accessToken: '', uid: '', enterpriseId: '', nickname: '' })
   const [hubText, setHubText] = useState('')
   const [notice, setNotice] = useState('')
@@ -525,26 +559,73 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
     const visibleCount = variant.models.filter(m => m.visible).length
 
     return h('div', { style: S.card, key: variant.id },
-      h('div', { style: { ...S.variantHead, marginBottom: isCollapsed ? 0 : '10px', borderBottom: isCollapsed ? 'none' : S.variantHead.borderBottom, paddingBottom: isCollapsed ? 0 : '8px' } },
-        h('button', {
-          style: { ...S.btn, padding: '2px 8px' },
-          onClick: () => setCollapsed(prev => ({ ...prev, [variant.id]: !isCollapsed })),
-          title: isCollapsed ? t('expand') : t('collapse'),
-        }, `${isCollapsed ? '▸' : '▾'} ${isCollapsed ? t('expand') : t('collapse')}`),
-        h('strong', null, variant.displayName),
-        h('span', { style: S.badge }, regionLabel),
-        h('span', {
-          style: variant.providerRegistered ? { ...S.badge, ...S.badgeOk } : { ...S.badge, ...S.badgeWarn },
-        }, variant.providerRegistered ? 'DSH 可用' : 'DSH 未就绪'),
-        h('span', { style: S.muted }, `${variant.accounts.length} 账号 · ${visibleCount}/${variant.models.length} 模型`),
-        isCollapsed ? null : (variant.baseUrl === ''
-          ? h('span', { style: { ...S.badge, ...S.badgeOff, marginLeft: 'auto' } }, t('endpointOff'))
-          : h('div', { style: { ...S.row, marginLeft: 'auto' } },
-            h('code', { style: { ...S.mono, maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, variant.baseUrl),
-            actionButton(`url:${variant.id}`, copied === `url:${variant.id}` ? t('copied') : t('copy'), () => {
-              void copyText(`url:${variant.id}`, variant.baseUrl)
-            }),
-          )),
+      // 头部固定两行：第一行是身份与操作，第二行是端点地址。
+      // 之前把端点地址塞进同一行，勾上对外开关后地址一出现就把操作挤到第二行，
+      // 折叠按钮和状态徽章跟着换行，看起来像布局坏了。
+      h('div', { style: { borderBottom: isCollapsed ? 'none' : S.variantHead.borderBottom, paddingBottom: isCollapsed ? 0 : '8px', marginBottom: isCollapsed ? 0 : '10px' } },
+        h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+          h('div', { style: { ...S.row, minWidth: 0 } },
+            h('button', {
+              style: { ...S.btn, padding: '2px 8px' },
+              onClick: () => setCollapsed(prev => ({ ...prev, [variant.id]: !isCollapsed })),
+              title: isCollapsed ? t('expand') : t('collapse'),
+            }, `${isCollapsed ? '▸' : '▾'} ${isCollapsed ? t('expand') : t('collapse')}`),
+            h('strong', { style: { whiteSpace: 'nowrap' } }, variant.displayName),
+            h('span', { style: S.badge }, regionLabel),
+            h('span', {
+              style: variant.providerRegistered ? { ...S.badge, ...S.badgeOk } : { ...S.badge, ...S.badgeWarn },
+            }, variant.providerRegistered ? 'DSH 可用' : 'DSH 未就绪'),
+            h('span', { style: { ...S.muted, whiteSpace: 'nowrap' } }, `${variant.accounts.length} 账号 · ${visibleCount}/${variant.models.length} 模型`),
+          ),
+          // 一键操作：刷新本版本全部账号（目录 + 积分），国内版另有签到
+          h('div', { style: { ...S.row, flexShrink: 0 } },
+            variant.hasCheckin
+              ? actionButton(`checkin:${variant.id}`, t('checkinAll'), () => {
+                setNotice('')
+                setBusy(`checkin:${variant.id}`)
+                void (async () => {
+                  try {
+                    const next = await postDocument('/variant/checkin', { variantId: variant.id })
+                    setDoc(next)
+                    const results = (next as unknown as { results?: { ok: boolean }[] }).results ?? []
+                    const okCount = results.filter(r => r.ok).length
+                    setNotice(t('checkinDone', { ok: okCount, total: results.length }))
+                    setError('')
+                  } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
+                })()
+              }, t('working'))
+              : null,
+            actionButton(`refreshVariant:${variant.id}`, t('refreshVariant'), () => {
+              setNotice('')
+              setBusy(`refreshVariant:${variant.id}`)
+              void (async () => {
+                try {
+                  const next = await postDocument('/variant/refresh', { variantId: variant.id })
+                  setDoc(next)
+                  const r = next as unknown as { catalogsOk: number; catalogsFailed: number; creditsOk: number; creditsFailed: number }
+                  setNotice(t('refreshDone', {
+                    ok: r.catalogsOk,
+                    failed: r.catalogsFailed,
+                    credits: r.creditsOk,
+                  }))
+                  setError('')
+                } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
+              })()
+            }, t('working')),
+          ),
+        ),
+        // 第二行：对外端点地址（未启用时给出提示）
+        isCollapsed ? null : h('div', { style: { ...S.row, marginTop: '6px' } },
+          h('span', { style: S.muted }, t('externalEndpoint')),
+          variant.baseUrl === ''
+            ? h('span', { style: { ...S.badge, ...S.badgeOff } }, t('endpointOff'))
+            : h('div', { style: { ...S.row, minWidth: 0 } },
+              h('code', { style: { ...S.mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, variant.baseUrl),
+              actionButton(`url:${variant.id}`, copied === `url:${variant.id}` ? t('copied') : t('copy'), () => {
+                void copyText(`url:${variant.id}`, variant.baseUrl)
+              }),
+            ),
+        ),
       ),
 
       isCollapsed ? null : h('div', null,
@@ -680,6 +761,15 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
           }, t('working')),
           h('button', {
             style: S.btn,
+            onClick: () => {
+              setForm(f => ({ ...f, variantId: f.variantId === '' ? doc.variants[0]?.id ?? '' : f.variantId }))
+              setLogin(undefined)
+              setNotice('')
+              setOpenForm(openForm === 'login' ? '' : 'login')
+            },
+          }, t('linkLogin')),
+          h('button', {
+            style: S.btn,
             onClick: () => setOpenForm(openForm === 'hub' ? '' : 'hub'),
           }, t('importHub')),
           h('button', {
@@ -693,6 +783,98 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
       ),
 
       notice === '' ? null : h('div', { style: { ...S.muted, marginBottom: '8px', color: 'inherit' } }, notice),
+
+      openForm === 'login'
+        ? h('div', { style: { marginTop: '6px' } },
+          h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('linkLoginHint')),
+          h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('linkLoginStep')),
+          h('div', { style: S.row },
+            h('label', { style: S.muted }, t('variant'),
+              h('select', {
+                style: { ...S.input, width: 'auto' },
+                value: form.variantId,
+                onChange: (e: { target: { value: string } }) => {
+                  setForm(f => ({ ...f, variantId: e.target.value }))
+                  setLogin(undefined)
+                },
+              }, doc.variants.map(v => h('option', { key: v.id, value: v.id }, `${v.displayName}（${v.appName}）`))),
+            ),
+            h('button', {
+              style: S.btnPrimary,
+              disabled: busyAny || form.variantId === '',
+              onClick: () => {
+                void (async () => {
+                  setBusy('login')
+                  setNotice('')
+                  try {
+                    const next = await postDocument('/login/start', { variantId: form.variantId })
+                    const payload = next as unknown as { ok: boolean; state?: string; authUrl?: string; error?: string }
+                    setDoc(next)
+                    if (payload.ok && payload.state !== undefined && payload.authUrl !== undefined) {
+                      setLogin({ variantId: form.variantId, state: payload.state, authUrl: payload.authUrl, message: '' })
+                      // 立刻在浏览器里打开授权页，省掉一次手动复制。
+                      try { window.open(payload.authUrl, '_blank', 'noopener') } catch { /* 被拦截时用户可手动点 */ }
+                      // 开始轮询，直到拿到账号或超时。
+                      const started = Date.now()
+                      const timer = setInterval(() => {
+                        void (async () => {
+                          try {
+                            const polled = await postDocument('/login/poll', { state: payload.state })
+                            const r = polled as unknown as { ok: boolean; status: string; message?: string; error?: string; account?: { nickname: string; account: string } }
+                            setDoc(polled)
+                            if (r.status === 'pending') {
+                              setLogin(prev => prev === undefined ? prev : { ...prev, message: r.message ?? '' })
+                            } else {
+                              clearInterval(timer)
+                              setBusy('')
+                              if (r.ok && r.account !== undefined) {
+                                setNotice(t('linkLoginOk', { name: r.account.nickname || r.account.account }))
+                                setLogin(undefined)
+                                setOpenForm('')
+                              } else {
+                                setLogin(prev => prev === undefined ? prev : { ...prev, message: r.error ?? t('linkLoginFailed') })
+                              }
+                            }
+                            // 与上游一致的 10 分钟窗口，客户端这边留点余量。
+                            if (Date.now() - started > 9 * 60 * 1000) { clearInterval(timer); setBusy(''); setLogin(undefined) }
+                          } catch {
+                            // 单次失败不打断轮询
+                          }
+                        })()
+                      }, 2000)
+                    } else {
+                      setBusy('')
+                      setError(payload.error ?? t('linkLoginFailed'))
+                    }
+                  } catch (err: unknown) {
+                    setBusy('')
+                    setError(String(err))
+                  }
+                })()
+              },
+            }, busy === 'login' ? t('linkLoginOpening') : t('linkLoginStart')),
+            h('button', { style: S.btn, onClick: () => { setOpenForm(''); setLogin(undefined) } }, t('cancel')),
+          ),
+          login === undefined
+            ? null
+            : h('div', { style: { ...S.accountRow, marginTop: '10px' } },
+              h('div', { style: { ...S.row, marginBottom: '6px' } },
+                h('span', { style: { ...S.badge, ...S.badgeInfo } }, '⟳'),
+                h('span', { style: S.muted }, login.message === '' ? t('linkLoginWaiting') : login.message),
+              ),
+              h('div', { style: S.row },
+                h('button', {
+                  style: S.btn,
+                  onClick: () => { try { window.open(login.authUrl, '_blank', 'noopener') } catch { /* 用户可手动复制 */ } },
+                }, t('linkLoginOpen')),
+                actionButton('loginUrl', copied === 'loginUrl' ? t('copied') : t('copy'), () => {
+                  void copyText('loginUrl', login.authUrl)
+                }),
+              ),
+              h('code', { style: { ...S.mono, display: 'block', marginTop: '6px', wordBreak: 'break-all', ...S.muted } }, login.authUrl),
+            ),
+        )
+        : null,
 
       openForm === 'hub'
         ? h('div', { style: { marginTop: '6px' } },
