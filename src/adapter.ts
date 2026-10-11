@@ -98,7 +98,6 @@ function toPiModel(
   providerId: string,
   probed: readonly string[],
   useMaximumContextWindow: boolean,
-  probedImage: boolean | undefined,
 ): Model<Api> {
   return {
     id: info.id,
@@ -106,8 +105,7 @@ function toPiModel(
     api: 'openai-completions',
     provider: providerId,
     baseUrl,
-    // 上游对 CLI 名单一律声明支持图片，实测结论更可信，有实测值时以它为准。
-    input: (probedImage ?? info.supportsImages) ? ['text', 'image'] : ['text'],
+    input: info.supportsImages ? ['text', 'image'] : ['text'],
     ...reasoningFields(info, probed),
     cost: NO_COST,
     contextWindow: resolveContextWindow(info, useMaximumContextWindow),
@@ -140,8 +138,6 @@ export interface HyperAdapterOptions {
   hidden: () => string[]
   /** 某模型本地探测到的推理档位；上游未声明时生效。 */
   probedEfforts?: (modelId: string) => readonly string[]
-  /** 某模型实测的图片支持；有值时覆盖上游声明。 */
-  probedImage?: (modelId: string) => boolean | undefined
   /** 是否把窗口抬到上游声明的最大档位。 */
   useMaximumContextWindow?: () => boolean
   /**
@@ -172,7 +168,6 @@ export function createHyperAdapter(options: HyperAdapterOptions): HyperAdapter {
     const useMaximum = options.useMaximumContextWindow?.() === true
     return pool.modelsFor(variantId).map(model => toPiModel(
       model, baseUrl, providerId, options.probedEfforts?.(model.id) ?? [], useMaximum,
-      options.probedImage?.(model.id),
     ))
   }
 

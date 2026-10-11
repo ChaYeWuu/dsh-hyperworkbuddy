@@ -71,12 +71,6 @@ const HARD_CREDIT_MARKERS = [
 
 const SESSION_DEAD_MARKERS = ['Offline user session not found', '12153'] as const
 
-/** 明确指向「不接受图片」的错误关键词。 */
-const IMAGE_REJECT_MARKERS = ['image', 'multimodal', 'vision', '图片', '多模态'] as const
-
-/** 探测用的 1×1 透明 PNG。 */
-const PROBE_IMAGE_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
-
 /** 上游错误体上限，避免异常大 body 吃内存。 */
 const ERROR_BODY_LIMIT = 4096
 
@@ -910,72 +904,6 @@ export async function probeEfforts(
   }
 
   return { accepted, detail, aborted: '' }
-}
-
-/** 图片探测结论。 */
-export interface ImageProbeResult {
-  /** 上游是否接受图片输入；探测被中止时为 false，调用方不应采纳。 */
-  supported: boolean
-  /** 探测是否被中止（限流 / 额度 / 会话失效）；非空表示结论不可信。 */
-  aborted: string
-  /** 可展示的说明。 */
-  detail: string
-}
-
-/**
- * 探测一个模型是否真的接受图片输入。
- *
- * 上游对 CLI 名单里的模型一律声明 `supportsImages: true`，但声明未必属实。
- * 这里发一条只含 1×1 透明 PNG 的最小请求：
- *
- * - 返回 200 → 图片被接受
- * - 返回 400 且错误里提到图片相关词 → 图片不被接受
- * - 其他失败（限流、额度、会话）→ 判为不可验证，不写结论
- *
- * 探测结果只在本机缓存，面板上与「上游声明」分开显示。
- *
- * @param credential - 目标凭据。
- * @param modelId - 模型 id。
- * @param signal - 取消信号。
- * @returns 探测结论。
- */
-export async function probeImage(
-  credential: WorkBuddyCredential,
-  modelId: string,
-  signal?: AbortSignal,
-): Promise<ImageProbeResult> {
-  const body = JSON.stringify({
-    model: modelId,
-    stream: true,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'image_url', image_url: { url: PROBE_IMAGE_DATA_URL } },
-        { type: 'text', text: 'ping' },
-      ],
-    }],
-    // 图片本身占不了输出，把开销压到最小。
-    max_tokens: 1,
-  })
-  const result = await chatCompletions(credential, body, signal)
-  if (result.ok) {
-    try { await result.response.body?.cancel() } catch { /* 忽略 */ }
-    return { supported: true, aborted: '', detail: '上游接受图片' }
-  }
-  // 探测本身没跑通，结论不可信，交给调用方决定不写状态。
-  if (result.kind === 'soft_rate' || result.kind === 'hard_credit' || result.kind === 'session_dead') {
-    return { supported: false, aborted: result.kind, detail: `探测中止：${result.message}` }
-  }
-  const lower = result.message.toLowerCase()
-  const mentionsImage = IMAGE_REJECT_MARKERS.some(marker => lower.includes(marker) || result.message.includes(marker))
-  if (result.status === 400 && mentionsImage) {
-    return { supported: false, aborted: '', detail: `上游拒绝图片输入：${result.message}` }
-  }
-  // 400 但错误与图片无关，说明是别处的参数问题；不算「不支持图片」。
-  if (result.status === 400) {
-    return { supported: false, aborted: 'unknown', detail: `无法判定：${result.message}` }
-  }
-  return { supported: false, aborted: 'unknown', detail: `未验证（${result.kind}）：${result.message}` }
 }
 
 /** 刷新 access token。 */

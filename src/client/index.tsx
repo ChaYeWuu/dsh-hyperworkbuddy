@@ -122,13 +122,6 @@ const zh = {
   reasoningProbeHint: '上游未声明档位时可手动探测：逐个档位发一条最小请求，只采纳上游接受的档位。会消耗少量额度。',
   modelContext: '上下文',
   modelMaxOutput: '最大输出',
-  modelImages: '图片',
-  modelImagesYes: '支持',
-  modelImagesNo: '不支持',
-  modelImagesProbed: '实测',
-  modelImagesProbe: '探测图片',
-  modelImagesProbing: '探测中',
-  modelImagesProbeHint: '上游对可用的模型一律声明支持图片，声明未必属实。探测会发一条只含 1×1 图片的最小请求，实测结果优先于上游声明。会消耗少量额度。',
   modelContextTiers: '多档',
   contextWindowUseMax: '使用上游声明的最大窗口',
   contextWindowHint: '上游为部分模型声明了多档窗口：默认档与更大档。开启后按最大档上报给 DSH，只影响声明了更大档位的模型。',
@@ -259,13 +252,6 @@ const en: typeof zh = {
   reasoningProbeHint: 'When the upstream declares no levels, probe them: one minimal request per level, keeping only the accepted ones. Consumes a little credit.',
   modelContext: 'Context',
   modelMaxOutput: 'Max output',
-  modelImages: 'Images',
-  modelImagesYes: 'supported',
-  modelImagesNo: 'not supported',
-  modelImagesProbed: 'probed',
-  modelImagesProbe: 'Probe image',
-  modelImagesProbing: 'Probing',
-  modelImagesProbeHint: 'The upstream declares image support for every served model, which may not hold. Probing sends one minimal request carrying a 1×1 image; the measured result outranks the declaration. Consumes a little credit.',
   modelContextTiers: 'multi-tier',
   contextWindowUseMax: 'Use the largest window the upstream declares',
   contextWindowHint: 'The upstream declares several window tiers for some models: a default tier and larger ones. When on, the largest tier is reported to DSH; models without a larger tier are unaffected.',
@@ -308,9 +294,6 @@ interface PanelModel {
   /** 上游声明的全部窗口档位；空数组表示没有档位可选。 */
   supportedContextWindows: number[]
   maxTokens: number
-  supportsImages: boolean
-  /** 图片能力的来源：上游声明、本地实测，或都没有。 */
-  imagesSource: 'declared' | 'probed' | 'none'
   credits?: string
   free: boolean
   visible: boolean
@@ -866,7 +849,6 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
         ),
         h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('modelsHint')),
         h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('reasoningProbeHint')),
-        h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('modelImagesProbeHint')),
         // 窗口档位开关：上游给国际版声明了默认档（300k）与更大档（1M）
         h('label', { style: S.switchRow },
           h('input', {
@@ -905,7 +887,6 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
             variant.models.map(model => {
               const modelKey = `model:${variant.id}:${model.id}`
               const probeKey = `probe:${variant.id}:${model.id}`
-              const imageProbeKey = `image:${variant.id}:${model.id}`
               const tiers = contextTiers(model)
               // 上游声明了档位就不必探测；没声明且模型本身支持推理才给探测入口。
               const canProbe = model.effortsSource === 'none' && model.available
@@ -970,7 +951,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                     }, t('reasoningProbing'))
                     : null,
                 ),
-                // 容量信息：窗口 / 输出上限 / 图片，与推理档位同处一行起，便于横向比较
+                // 容量信息：窗口 / 输出上限，与推理档位同处一行起，便于横向比较
                 h('div', { style: { ...S.row, gap: '4px', paddingLeft: '22px' } },
                   h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('modelContext')}:`),
                   h('span', { style: { fontSize: '11px' } }, formatTokens(model.contextWindow)),
@@ -982,30 +963,6 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                     : null,
                   h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('modelMaxOutput')}:`),
                   h('span', { style: { fontSize: '11px' } }, formatTokens(model.maxTokens)),
-                  h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('modelImages')}:`),
-                  h('span', {
-                    style: { ...S.badge, ...(model.supportsImages ? S.badgeOk : S.badgeOff), fontSize: '10px', padding: '0 4px' },
-                    title: model.imagesSource === 'probed' ? t('modelImagesProbed') : undefined,
-                  }, model.supportsImages
-                    ? `${t('modelImagesYes')}${model.imagesSource === 'probed' ? ` · ${t('modelImagesProbed')}` : ''}`
-                    : t('modelImagesNo')),
-                  model.available
-                    ? actionButton(imageProbeKey, t('modelImagesProbe'), () => {
-                      setBusy(imageProbeKey)
-                      setNotice('')
-                      void (async () => {
-                        try {
-                          const next = await postPayload('/model/probe-image', { variantId: variant.id, modelId: model.id })
-                          if (next.document !== undefined) setDoc(next.document)
-                          const r = next as unknown as { ok: boolean; supported?: boolean; detail?: string; error?: string }
-                          setNotice(`${model.name}: ${r.ok === true
-                            ? (r.supported === true ? t('modelImagesYes') : t('modelImagesNo'))
-                            : r.error ?? r.detail ?? t('reasoningNone')}`)
-                          setError('')
-                        } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
-                      })()
-                    }, t('modelImagesProbing'))
-                    : null,
                 ),
               )
             }),

@@ -27,7 +27,7 @@ import { createHyperAdapter, type HyperAdapter } from './adapter.ts'
 import { parseHubExport } from './import.ts'
 import { createHyperShim, type HyperShim } from './shim.ts'
 import { PluginState } from './state.ts'
-import { checkin, pollLogin, probeEfforts, probeImage, resolveContextWindow, startLogin } from './upstream.ts'
+import { checkin, pollLogin, probeEfforts, resolveContextWindow, startLogin } from './upstream.ts'
 import { UsageLedger, type UsageSummary } from './usage.ts'
 import { WORKBUDDY_VARIANTS, variantFor, type WorkBuddyVariant } from './variants.ts'
 
@@ -83,9 +83,6 @@ interface PanelModel {
   /** 上游声明的全部窗口档位；空数组表示上游没有档位可选。 */
   supportedContextWindows: number[]
   maxTokens: number
-  supportsImages: boolean
-  /** 图片能力的来源：上游声明、本地实测，或都没有。 */
-  imagesSource: 'declared' | 'probed' | 'none'
   credits?: string
   free: boolean
   /** 是否在选择器中可见。 */
@@ -329,6 +326,36 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  /**
+   * 补刷「已开开关但缓存里没有档位」的目录。
+   *
+   * 窗口档位只在上游 live 目录里，旧缓存行连 `supportedContextWindows` 字段都没有；
+   * 用户此前已经把开关打开的话，不会再有「开启」这个动作去触发刷新，开关就一直等于没开。
+   *
+   * 刷到档位后 `cached.some(...)` 会一直成立，所以这个自愈每个版本只会真的打一次上游；
+   * 对上游本来就不声明档位的版本（如国内版），每次启动会多一次目录请求。
+   *
+   * @returns 实际刷到档位的模型数。
+   */
+  async function healMaximumContextWindows(): Promise<number> {
+    let healed = 0
+    for (const variant of WORKBUDDY_VARIANTS) {
+      if (!state.usesMaximumContextWindow(variant.id)) continue
+      const cached = pool.modelsFor(variant.id)
+      if (cached.length === 0) continue
+      if (cached.some(model => model.supportedContextWindows.length > 0)) continue
+      for (const account of pool.list()) {
+        if (account.variantId !== variant.id || account.disabled) continue
+        await pool.refreshCatalog(account.account, variant.id).catch(() => undefined)
+      }
+      const count = pool.modelsFor(variant.id)
+        .filter(model => model.supportedContextWindows.length > 0).length
+      healed += count
+      ctx.logger.info(`hyperworkbuddy: ${variant.id} 开关已开但缓存缺窗口档位，已补刷目录（${count} 个模型声明了更大档位）`)
+    }
+    return healed
+  }
+
   /** 首次装载状态与账号，并拉一次目录。 */
   async function bootstrap(): Promise<void> {
     await migrateLegacyState()
@@ -343,6 +370,10 @@ export function apply(ctx: Context, config: Config): void {
     if (pool.allModels().length === 0) {
       await pool.refreshAllCatalogs().catch(() => undefined)
     }
+    // 放后台：上游不可达时不能拖住启动，provider 起来后会自己读最新目录。
+    void healMaximumContextWindows()
+      .then(() => { if (!stopped) invalidate() })
+      .catch(() => undefined)
   }
 
   /** 周期性重扫桌面登录，并在 token 临近过期时续期。 */
@@ -411,7 +442,6 @@ export function apply(ctx: Context, config: Config): void {
           const probed = state.probedFor(variant.id, model.id)
           // 上游声明优先；没声明才用本地探测结果。
           const efforts = declared.length > 0 ? declared : probed
-          const probedImages = state.probedImageFor(variant.id, model.id)
           byId.set(model.id, {
             id: model.id,
             name: model.name,
@@ -419,9 +449,6 @@ export function apply(ctx: Context, config: Config): void {
             declaredContextWindow: model.contextWindow,
             supportedContextWindows: model.supportedContextWindows,
             maxTokens: model.maxTokens,
-            // 实测优先：上游对 CLI 名单一律声明支持图片，声明未必属实。
-            supportsImages: probedImages ?? model.supportsImages,
-            imagesSource: probedImages === undefined ? (model.supportsImages ? 'declared' : 'none') : 'probed',
             ...model.billing.credits === undefined ? {} : { credits: model.billing.credits },
             free: model.billing.free,
             visible: !hidden.has(model.id),
@@ -442,8 +469,6 @@ export function apply(ctx: Context, config: Config): void {
           declaredContextWindow: 0,
           supportedContextWindows: [],
           maxTokens: 0,
-          supportsImages: false,
-          imagesSource: 'none',
           free: false,
           visible: false,
           available: false,
@@ -558,7 +583,6 @@ export function apply(ctx: Context, config: Config): void {
         variantId: variant.id,
         hidden: () => state.hidden(variant.id),
         probedEfforts: (modelId: string) => state.probedFor(variant.id, modelId),
-        probedImage: (modelId: string) => state.probedImageFor(variant.id, modelId),
         useMaximumContextWindow: () => state.usesMaximumContextWindow(variant.id),
         // 图片必须走宿主的附件服务，否则声明了图片能力的模型一发图就报
         // 「pi-ai image input requires the durable attachment service」。
@@ -822,38 +846,6 @@ export function apply(ctx: Context, config: Config): void {
             ok: result.aborted === '',
             ...result,
             ...result.aborted === '' ? {} : { error: result.detail.at(-1)?.reason ?? '探测中止' },
-            document: panelDocument(),
-          })
-        } catch (error: unknown) {
-          json(res, 200, { ok: false, error: String(error), document: panelDocument() })
-        }
-      })
-
-      // 图片支持探测：上游对 CLI 名单一律声明支持，实测才作数
-      mount(`${ROUTE_PREFIX}/model/probe-image`, async (req, res) => {
-        const body = await readJsonBody(req)
-        const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
-        const modelId = typeof body['modelId'] === 'string' ? body['modelId'] : ''
-        if (variantFor(variantId) === undefined || modelId === '') {
-          json(res, 400, { ok: false, error: '缺少 variantId 或 modelId', document: panelDocument() })
-          return
-        }
-        const account = pool.available(variantId)[0]
-        if (account === undefined) {
-          json(res, 200, { ok: false, error: '该版本没有可用账号', document: panelDocument() })
-          return
-        }
-        try {
-          const result = await probeImage(toCredential(account), modelId)
-          // 探测被限流/额度打断时结论不可信，不写状态。
-          if (result.aborted === '') {
-            await state.setProbedImage(variantId, modelId, result.supported)
-            invalidate()
-          }
-          json(res, 200, {
-            ok: result.aborted === '',
-            ...result,
-            ...result.aborted === '' ? {} : { error: result.detail },
             document: panelDocument(),
           })
         } catch (error: unknown) {
