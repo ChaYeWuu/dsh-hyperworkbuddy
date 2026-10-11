@@ -120,6 +120,15 @@ const zh = {
   reasoningProbing: '探测中',
   reasoningNone: '未声明',
   reasoningProbeHint: '上游未声明档位时可手动探测：逐个档位发一条最小请求，只采纳上游接受的档位。会消耗少量额度。',
+  modelContext: '上下文',
+  modelMaxOutput: '最大输出',
+  modelImages: '图片',
+  modelImagesYes: '支持',
+  modelImagesNo: '不支持',
+  modelContextTiers: '多档',
+  contextWindowUseMax: '使用上游声明的最大窗口',
+  contextWindowHint: '上游为部分模型声明了多档窗口：默认档与更大档。开启后按最大档上报给 DSH，只影响声明了更大档位的模型。',
+  contextWindowEffect: '改动对下一条请求生效；正在进行的对话会在下次发送时才更新显示。',
 
   usageSection: '用量',
   usageToday: '今日',
@@ -242,6 +251,15 @@ const en: typeof zh = {
   reasoningProbing: 'Probing',
   reasoningNone: 'not declared',
   reasoningProbeHint: 'When the upstream declares no levels, probe them: one minimal request per level, keeping only the accepted ones. Consumes a little credit.',
+  modelContext: 'Context',
+  modelMaxOutput: 'Max output',
+  modelImages: 'Images',
+  modelImagesYes: 'supported',
+  modelImagesNo: 'not supported',
+  modelContextTiers: 'multi-tier',
+  contextWindowUseMax: 'Use the largest window the upstream declares',
+  contextWindowHint: 'The upstream declares several window tiers for some models: a default tier and larger ones. When on, the largest tier is reported to DSH; models without a larger tier are unaffected.',
+  contextWindowEffect: 'The change applies to the next request; an ongoing conversation updates its display on the next send.',
 
   usageSection: 'Usage',
   usageToday: 'Today',
@@ -271,7 +289,12 @@ const en: typeof zh = {
 interface PanelModel {
   id: string
   name: string
+  /** 当前开关下实际生效的窗口。 */
   contextWindow: number
+  /** 上游自己挑的默认档位。 */
+  declaredContextWindow: number
+  /** 上游声明的全部窗口档位；空数组表示没有档位可选。 */
+  supportedContextWindows: number[]
   maxTokens: number
   supportsImages: boolean
   credits?: string
@@ -322,6 +345,8 @@ interface PanelVariant {
   externalError: string
   /** 该版本是否支持每日签到（只有国内版）。 */
   hasCheckin: boolean
+  /** 该版本是否使用上游声明的最大上下文窗口。 */
+  useMaximumContextWindow: boolean
   providerRegistered: boolean
   providerError: string
   accounts: PanelAccount[]
@@ -818,6 +843,24 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
         ),
         h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('modelsHint')),
         h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('reasoningProbeHint')),
+        // 窗口档位开关：上游给国际版声明了默认档（300k）与更大档（1M）
+        h('label', { style: S.switchRow },
+          h('input', {
+            type: 'checkbox',
+            checked: variant.useMaximumContextWindow,
+            disabled: busyAny,
+            onChange: () => {
+              void run(`ctxwindow:${variant.id}`, '/contextwindow', {
+                variantId: variant.id,
+                useMaximum: !variant.useMaximumContextWindow,
+              })
+            },
+          }),
+          h('span', null, t('contextWindowUseMax')),
+          busy === `ctxwindow:${variant.id}` ? h('span', { style: S.muted }, '⟳') : null,
+        ),
+        h('p', { style: { ...S.sub, marginTop: '4px' } }, t('contextWindowHint')),
+        h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('contextWindowEffect')),
         variant.models.length === 0
           ? h('div', { style: S.muted }, t('noModels'))
           : h('div', { style: S.modelGrid },
@@ -829,7 +872,13 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
               return h('div', {
                 key: model.id,
                 style: { ...S.modelCell, opacity: model.visible ? 1 : 0.55, flexDirection: 'column', alignItems: 'stretch', gap: '2px' },
-                title: `${model.id}\nctx ${model.contextWindow} · max ${model.maxTokens}${model.supportsImages ? ' · 图片' : ''}${model.credits === undefined ? '' : ` · ${model.credits}`}`,
+                title: [
+                  model.id,
+                  model.supportedContextWindows.length > 1
+                    ? `${t('modelContext')}: ${model.supportedContextWindows.join(' / ')}`
+                    : '',
+                  model.credits === undefined ? '' : `${model.credits} credits`,
+                ].filter(Boolean).join('\n'),
               },
                 h('label', { style: { ...S.row, gap: '6px', cursor: 'pointer' } },
                   h('input', {
@@ -880,6 +929,23 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                       })()
                     }, t('reasoningProbing'))
                     : null,
+                ),
+                // 容量信息：窗口 / 输出上限 / 图片，与推理档位同处一行起，便于横向比较
+                h('div', { style: { ...S.row, gap: '4px', paddingLeft: '22px' } },
+                  h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('modelContext')}:`),
+                  h('span', { style: { fontSize: '11px' } }, formatTokens(model.contextWindow)),
+                  model.supportedContextWindows.length > 1
+                    ? h('span', {
+                      style: { ...S.badge, ...S.badgeInfo, fontSize: '10px', padding: '0 4px' },
+                      title: model.supportedContextWindows.join(' / '),
+                    }, t('modelContextTiers'))
+                    : null,
+                  h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('modelMaxOutput')}:`),
+                  h('span', { style: { fontSize: '11px' } }, formatTokens(model.maxTokens)),
+                  h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('modelImages')}:`),
+                  h('span', {
+                    style: { ...S.badge, ...(model.supportsImages ? S.badgeOk : S.badgeOff), fontSize: '10px', padding: '0 4px' },
+                  }, model.supportsImages ? t('modelImagesYes') : t('modelImagesNo')),
                 ),
               )
             }),

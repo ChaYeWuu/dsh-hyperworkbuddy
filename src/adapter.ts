@@ -18,6 +18,7 @@ import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { AccountPool } from './accounts.ts'
 import type { HyperShim } from './shim.ts'
 import type { UpstreamModel } from './upstream.ts'
+import { resolveContextWindow } from './upstream.ts'
 
 /** 流式空闲上限：一个流读挂起时的最大等待。 */
 export const STREAM_IDLE_TIMEOUT_MS = 300_000
@@ -91,7 +92,13 @@ export function reasoningFields(
 }
 
 /** 把一条上游模型转成 pi-ai 模型描述。 */
-function toPiModel(info: UpstreamModel, baseUrl: string, providerId: string, probed: readonly string[]): Model<Api> {
+function toPiModel(
+  info: UpstreamModel,
+  baseUrl: string,
+  providerId: string,
+  probed: readonly string[],
+  useMaximumContextWindow: boolean,
+): Model<Api> {
   return {
     id: info.id,
     name: info.name,
@@ -101,7 +108,7 @@ function toPiModel(info: UpstreamModel, baseUrl: string, providerId: string, pro
     input: info.supportsImages ? ['text', 'image'] : ['text'],
     ...reasoningFields(info, probed),
     cost: NO_COST,
-    contextWindow: info.contextWindow,
+    contextWindow: resolveContextWindow(info, useMaximumContextWindow),
     maxTokens: info.maxTokens,
     // pi-ai 无法从回环地址推断 WorkBuddy 的字段拼写，这里显式点名。
     // sendSessionAffinityHeaders 让 pi-ai 把 sessionId 转成 x-session-id 等头，
@@ -131,6 +138,8 @@ export interface HyperAdapterOptions {
   hidden: () => string[]
   /** 某模型本地探测到的推理档位；上游未声明时生效。 */
   probedEfforts?: (modelId: string) => readonly string[]
+  /** 是否把窗口抬到上游声明的最大档位。 */
+  useMaximumContextWindow?: () => boolean
   /**
    * 图片附件存储。
    *
@@ -156,8 +165,9 @@ export function createHyperAdapter(options: HyperAdapterOptions): HyperAdapter {
   const buildModels = (): Model<Api>[] => {
     // pi-ai 驱动的 OpenAI SDK 会在 baseURL 后拼 `/chat/completions`。
     const baseUrl = `${shim.baseUrl()}/v1`
+    const useMaximum = options.useMaximumContextWindow?.() === true
     return pool.modelsFor(variantId).map(model => toPiModel(
-      model, baseUrl, providerId, options.probedEfforts?.(model.id) ?? [],
+      model, baseUrl, providerId, options.probedEfforts?.(model.id) ?? [], useMaximum,
     ))
   }
 

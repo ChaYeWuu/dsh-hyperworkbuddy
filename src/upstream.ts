@@ -29,7 +29,16 @@ export type ChatResult =
 export interface UpstreamModel {
   id: string
   name: string
+  /** 上游声明的输入硬上限；窗口档位再大也不该越过它。 */
+  maxInputTokens: number
+  /** 上游自己挑的默认窗口档位。 */
   contextWindow: number
+  /**
+   * 上游允许的全部窗口档位，升序。
+   *
+   * 只有国际版声明它；国内版连 `contextWindow` 字段都没有，这里会是空数组。
+   */
+  supportedContextWindows: number[]
   maxTokens: number
   supportsImages: boolean
   reasoning: {
@@ -286,9 +295,18 @@ function toUpstreamModel(row: Record<string, unknown>): UpstreamModel | undefine
   const maxOutput = Number(row['maxOutputTokens'] ?? 0)
   const contextRaw = row['contextWindow']
   let contextWindow = maxInput
+  let supportedContextWindows: number[] = []
   if (typeof contextRaw === 'object' && contextRaw !== null) {
-    const preferred = Number((contextRaw as Record<string, unknown>)['defaultLength'] ?? 0)
+    const box = contextRaw as Record<string, unknown>
+    const preferred = Number(box['defaultLength'] ?? 0)
     if (Number.isFinite(preferred) && preferred > 0) contextWindow = preferred
+    const lengths = box['supportedLengths']
+    if (Array.isArray(lengths)) {
+      const positive = lengths
+        .map((length): number => Number(length))
+        .filter((length): boolean => Number.isFinite(length) && length > 0)
+      supportedContextWindows = [...new Set(positive)].sort((a, b) => a - b)
+    }
   } else if (Number.isFinite(contextRaw) && Number(contextRaw) > 0) {
     contextWindow = Number(contextRaw)
   }
@@ -306,7 +324,9 @@ function toUpstreamModel(row: Record<string, unknown>): UpstreamModel | undefine
   return {
     id,
     name: typeof row['name'] === 'string' && row['name'] !== '' ? row['name'] : id,
+    maxInputTokens: maxInput,
     contextWindow,
+    supportedContextWindows,
     // 上游未声明输出上限时按输入窗口的三分之一估一个安全值，而不是报 0。
     maxTokens: Number.isFinite(maxOutput) && maxOutput > 0 ? maxOutput : Math.max(4096, Math.floor(contextWindow / 3)),
     supportsImages: row['supportsImages'] === true && row['disabledMultimodal'] !== true,
@@ -324,6 +344,23 @@ function toUpstreamModel(row: Record<string, unknown>): UpstreamModel | undefine
       free: credits !== undefined && /^x?0(?:\.0+)?$/iu.test(credits),
     },
   }
+}
+
+/**
+ * 按开关算出该模型实际生效的上下文窗口。
+ *
+ * 上游给国际版声明了 `supportedLengths`（如 300k / 1M），但默认只开 300k 档；
+ * 打开开关就抬到最大档，同时不越过上游声明的输入硬上限 `maxInputTokens`。
+ *
+ * @param info - 一条上游模型。
+ * @param useMaximum - 是否使用上游声明的最大窗口。
+ * @returns 生效窗口；没有更大档位时就是声明值。
+ */
+export function resolveContextWindow(info: UpstreamModel, useMaximum: boolean): number {
+  const declared = info.contextWindow
+  if (!useMaximum) return declared
+  const larger = info.supportedContextWindows.filter(length => length > declared && length <= info.maxInputTokens)
+  return larger.length === 0 ? declared : Math.max(...larger)
 }
 
 /**

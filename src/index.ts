@@ -27,7 +27,7 @@ import { createHyperAdapter, type HyperAdapter } from './adapter.ts'
 import { parseHubExport } from './import.ts'
 import { createHyperShim, type HyperShim } from './shim.ts'
 import { PluginState } from './state.ts'
-import { checkin, pollLogin, probeEfforts, startLogin } from './upstream.ts'
+import { checkin, pollLogin, probeEfforts, resolveContextWindow, startLogin } from './upstream.ts'
 import { UsageLedger, type UsageSummary } from './usage.ts'
 import { WORKBUDDY_VARIANTS, variantFor, type WorkBuddyVariant } from './variants.ts'
 
@@ -76,7 +76,12 @@ export const Config: z<Config> = z.object({
 interface PanelModel {
   id: string
   name: string
+  /** 当前开关下实际生效的窗口。 */
   contextWindow: number
+  /** 上游自己挑的默认档位，用于在面板上说明开关会改什么。 */
+  declaredContextWindow: number
+  /** 上游声明的全部窗口档位；空数组表示上游没有档位可选。 */
+  supportedContextWindows: number[]
   maxTokens: number
   supportsImages: boolean
   credits?: string
@@ -129,6 +134,8 @@ interface PanelVariant {
   externalError: string
   /** 该版本是否支持每日签到（只有国内版）。 */
   hasCheckin: boolean
+  /** 该版本是否使用上游声明的最大上下文窗口。 */
+  useMaximumContextWindow: boolean
   /** provider 是否已注册（与对外端点开关无关）。 */
   providerRegistered: boolean
   providerError: string
@@ -393,6 +400,7 @@ export function apply(ctx: Context, config: Config): void {
 
       // 模型表 = 该版本所有账号目录的并集，附可见性与推理档位。
       const byId = new Map<string, PanelModel>()
+      const useMaximum = state.usesMaximumContextWindow(variant.id)
       for (const account of pool.list()) {
         if (account.variantId !== variant.id) continue
         for (const model of account.models) {
@@ -404,7 +412,9 @@ export function apply(ctx: Context, config: Config): void {
           byId.set(model.id, {
             id: model.id,
             name: model.name,
-            contextWindow: model.contextWindow,
+            contextWindow: resolveContextWindow(model, useMaximum),
+            declaredContextWindow: model.contextWindow,
+            supportedContextWindows: model.supportedContextWindows,
             maxTokens: model.maxTokens,
             supportsImages: model.supportsImages,
             ...model.billing.credits === undefined ? {} : { credits: model.billing.credits },
@@ -424,6 +434,8 @@ export function apply(ctx: Context, config: Config): void {
           id: modelId,
           name: modelId,
           contextWindow: 0,
+          declaredContextWindow: 0,
+          supportedContextWindows: [],
           maxTokens: 0,
           supportsImages: false,
           free: false,
@@ -449,6 +461,7 @@ export function apply(ctx: Context, config: Config): void {
         externalRunning: runtime.external !== undefined,
         externalError: runtime.externalError,
         hasCheckin: variant.hasCheckin,
+        useMaximumContextWindow: useMaximum,
         providerRegistered: runtime.registered,
         providerError: runtime.error,
         accounts,
@@ -539,6 +552,7 @@ export function apply(ctx: Context, config: Config): void {
         variantId: variant.id,
         hidden: () => state.hidden(variant.id),
         probedEfforts: (modelId: string) => state.probedFor(variant.id, modelId),
+        useMaximumContextWindow: () => state.usesMaximumContextWindow(variant.id),
         // 图片必须走宿主的附件服务，否则声明了图片能力的模型一发图就报
         // 「pi-ai image input requires the durable attachment service」。
         resolveAttachments: () => ctx.get('attachments'),
@@ -679,6 +693,19 @@ export function apply(ctx: Context, config: Config): void {
         const result = await pool.refreshAllCatalogs()
         invalidate()
         json(res, 200, { ok: true, ...result, document: panelDocument() })
+      })
+
+      // 「使用最大上下文窗口」：抬到上游声明的最大档位，立即对下一条请求生效
+      mount(`${ROUTE_PREFIX}/contextwindow`, async (req, res) => {
+        const body = await readJsonBody(req)
+        const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
+        if (variantFor(variantId) === undefined) {
+          json(res, 400, { ok: false, error: '未知的 variantId', document: panelDocument() })
+          return
+        }
+        await state.setMaximumContextWindow(variantId, body['useMaximum'] === true)
+        invalidate()
+        json(res, 200, { ok: true, document: panelDocument() })
       })
 
       // 用量：面板轮询时直接给现成的桶，不重扫流水文件。

@@ -28,6 +28,13 @@ export interface PluginStateData {
    * 探测结果不该盖掉上游的权威说法。
    */
   probedEfforts: Record<string, Record<string, string[]>>
+  /**
+   * 逐版本「使用最大上下文窗口」：`{ 变体id: true }`。
+   *
+   * 上游给国际版声明了 `supportedLengths`（默认档 300k、最大档 1M），默认只用
+   * 默认档；打开后抬到最大档。国内版上游不声明档位，这里对它没有意义。
+   */
+  useMaximumContextWindow: Record<string, boolean>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -61,6 +68,7 @@ export class PluginState {
       endpointEnabled: defaults.endpointEnabled ?? true,
       hiddenModels: { ...defaults.hiddenModels },
       probedEfforts: { ...defaults.probedEfforts },
+      useMaximumContextWindow: { ...defaults.useMaximumContextWindow },
     }
   }
 
@@ -101,6 +109,14 @@ export class PluginState {
           if (Object.keys(bucket).length > 0) next[variant.id] = bucket
         }
         this.data.probedEfforts = next
+      }
+      const maximum = document['useMaximumContextWindow']
+      if (isRecord(maximum)) {
+        const next: Record<string, boolean> = {}
+        for (const variant of WORKBUDDY_VARIANTS) {
+          if (maximum[variant.id] === true) next[variant.id] = true
+        }
+        this.data.useMaximumContextWindow = next
       }
     } catch {
       // 损坏就按默认值走
@@ -146,6 +162,20 @@ export class PluginState {
     return this.data.probedEfforts[variantId]?.[modelId] ?? []
   }
 
+  /** 该版本是否使用上游声明的最大上下文窗口。 */
+  usesMaximumContextWindow(variantId: string): boolean {
+    return this.data.useMaximumContextWindow[variantId] === true
+  }
+
+  /** 设置「使用最大上下文窗口」并落盘。 */
+  async setMaximumContextWindow(variantId: string, useMaximum: boolean): Promise<void> {
+    const next = { ...this.data.useMaximumContextWindow }
+    if (useMaximum) next[variantId] = true
+    else delete next[variantId]
+    this.data.useMaximumContextWindow = next
+    await this.persist()
+  }
+
   /**
    * 记录一个模型探测到的档位。
    *
@@ -171,6 +201,7 @@ export class PluginState {
       endpointEnabled: this.data.endpointEnabled,
       hiddenModels: this.data.hiddenModels,
       probedEfforts: this.data.probedEfforts,
+      useMaximumContextWindow: this.data.useMaximumContextWindow,
     }
     await mkdir(dirname(this.path), { recursive: true })
     const temp = `${this.path}.${process.pid}.tmp`
