@@ -82,7 +82,9 @@
     "@earendil-works/pi-ai": "^0.87.1",
     "@types/node": "^22.20.0",
     "esbuild": "^0.28.2",
+    "js-yaml": "^4.1.0",
     "react": "^18.2.0",
+    "semver": "^7.7.2",
     "typescript": "^5.9.3"
   }
 }

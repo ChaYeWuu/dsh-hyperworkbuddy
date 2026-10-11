@@ -11,3 +11,6 @@ package-lock.json
 .probe020/
 .research/
 workbuddy-upstream-protocol-spec.md
+
+# 收录提交材料（暂存，不随插件分发）
+.submission/
