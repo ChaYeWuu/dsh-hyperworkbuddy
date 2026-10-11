@@ -922,16 +922,28 @@ export interface AccountProbeResult {
   message: string
 }
 
-/** 取上游声明的最低档位；没声明就返回空串（省略该字段即走上游默认档）。 */
-function lowestEffort(model: UpstreamModel): string {
+/** 探测优先用这个模型：两区目录里都有，且是最便宜的一档。 */
+const PROBE_MODEL_ID = 'deepseek-v4.1-flash'
+
+/** 挑探测模型：优先 deepseek-v4.1-flash，其次免费模型，再退回目录第一条。 */
+function probeModel(models: UpstreamModel[]): UpstreamModel | undefined {
+  return models.find(candidate => candidate.id === PROBE_MODEL_ID)
+    ?? models.find(candidate => candidate.billing.free)
+    ?? models[0]
+}
+
+/** 探测档位固定取 low；模型没声明就退回它声明的最低档，都没声明则省略该字段走上游默认。 */
+function probeEffort(model: UpstreamModel): string {
   const declared = model.reasoning.supportedEfforts ?? []
+  if (declared.length === 0) return ''
+  if (declared.includes('low')) return 'low'
   return EFFORT_VALUES.find(effort => declared.includes(effort)) ?? ''
 }
 
 /**
  * 用一条最小请求验证凭据当前可用。
  *
- * 优先挑免费模型，档位取声明的最低档，`max_tokens: 1`，把一次探测的开销压到最小。
+ * 优先用 deepseek-v4.1-flash 的 low 档，`max_tokens: 1`，把一次探测的开销压到最小。
  * 上游接了请求就立刻断开，不读正文。
  *
  * @param credential - 目标凭据。
@@ -944,11 +956,11 @@ export async function probeAccount(
   models: UpstreamModel[],
   signal?: AbortSignal,
 ): Promise<AccountProbeResult> {
-  const model = models.find(candidate => candidate.billing.free) ?? models[0]
+  const model = probeModel(models)
   if (model === undefined) {
     return { ok: false, model: '', effort: '', kind: 'client', message: '目录里没有可用的模型，请先刷新模型' }
   }
-  const effort = lowestEffort(model)
+  const effort = probeEffort(model)
   const body = JSON.stringify({
     model: model.id,
     stream: true,

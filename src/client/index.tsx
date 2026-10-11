@@ -610,6 +610,8 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
   const [form, setForm] = useState({ variantId: '', accessToken: '', uid: '', enterpriseId: '', nickname: '' })
   const [hubText, setHubText] = useState('')
   const [notice, setNotice] = useState('')
+  /** 账号卡就地回执：全局 notice 渲染在面板最下方，账号卡在它上面，点完看不到。 */
+  const [accountNotice, setAccountNotice] = useState<Record<string, { text: string; ok: boolean }>>({})
   /** 用量「清空记录」的二次确认态。 */
   const [clearArmed, setClearArmed] = useState(false)
 
@@ -706,21 +708,28 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
           }, t('working')),
           actionButton(`refreshAccount:${key}`, t('refreshAccount'), () => {
             const busyKey = `refreshAccount:${key}`
-            setNotice('')
+            setAccountNotice(prev => ({ ...prev, [key]: { text: '', ok: true } }))
             setBusy(busyKey)
             void (async () => {
               try {
                 const raw = await postPayload('/account/refresh', { account: account.account, variantId: account.variantId })
                 if (raw.document !== undefined) setDoc(raw.document)
-                setNotice(raw.ok === true
-                  ? t('refreshAccountDone', {
-                    model: typeof raw['model'] === 'string' && raw['model'] !== '' ? raw['model'] : '—',
-                    effort: typeof raw['effort'] === 'string' && raw['effort'] !== '' ? raw['effort'] : t('refreshAccountNoEffort'),
-                  })
-                  : `${t('refreshAccount')}: ${typeof raw['error'] === 'string' ? raw['error'] : t('refreshAccountHint')}`)
+                const ok = raw.ok === true
+                setAccountNotice(prev => ({
+                  ...prev,
+                  [key]: {
+                    ok,
+                    text: ok
+                      ? t('refreshAccountDone', {
+                        model: typeof raw['model'] === 'string' && raw['model'] !== '' ? raw['model'] : '—',
+                        effort: typeof raw['effort'] === 'string' && raw['effort'] !== '' ? raw['effort'] : t('refreshAccountNoEffort'),
+                      })
+                      : `${t('refreshAccount')}: ${typeof raw['error'] === 'string' ? raw['error'] : t('refreshAccountHint')}`,
+                  },
+                }))
                 setError('')
               } catch (err) {
-                setError(String(err))
+                setAccountNotice(prev => ({ ...prev, [key]: { ok: false, text: `${t('refreshAccount')}: ${String(err)}` } }))
               } finally {
                 setBusy('')
               }
@@ -736,6 +745,9 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
           }),
         ),
       ),
+      accountNotice[key] === undefined || accountNotice[key].text === ''
+        ? null
+        : h('div', { style: accountNotice[key].ok ? { ...S.muted, marginTop: '6px' } : { ...S.error, marginTop: '6px' } }, accountNotice[key].text),
       h('div', { style: { ...S.row, marginTop: '6px', gap: '16px' } },
         h('span', { style: S.muted }, account.nickname === '' ? '—' : account.nickname),
         account.domain === '' ? null : h('span', { style: S.muted }, account.domain),
