@@ -125,10 +125,16 @@ const zh = {
   modelImages: '图片',
   modelImagesYes: '支持',
   modelImagesNo: '不支持',
+  modelImagesProbed: '实测',
+  modelImagesProbe: '探测图片',
+  modelImagesProbing: '探测中',
+  modelImagesProbeHint: '上游对可用的模型一律声明支持图片，声明未必属实。探测会发一条只含 1×1 图片的最小请求，实测结果优先于上游声明。会消耗少量额度。',
   modelContextTiers: '多档',
   contextWindowUseMax: '使用上游声明的最大窗口',
   contextWindowHint: '上游为部分模型声明了多档窗口：默认档与更大档。开启后按最大档上报给 DSH，只影响声明了更大档位的模型。',
   contextWindowEffect: '改动对下一条请求生效；正在进行的对话会在下次发送时才更新显示。',
+  contextWindowRefreshed: '已刷新 {ok} 个账号的模型目录（失败 {failed} 个）',
+  contextWindowNoTiers: '已开启，但当前目录里没有声明更大档位的模型',
 
   usageSection: '用量',
   usageToday: '今日',
@@ -256,10 +262,16 @@ const en: typeof zh = {
   modelImages: 'Images',
   modelImagesYes: 'supported',
   modelImagesNo: 'not supported',
+  modelImagesProbed: 'probed',
+  modelImagesProbe: 'Probe image',
+  modelImagesProbing: 'Probing',
+  modelImagesProbeHint: 'The upstream declares image support for every served model, which may not hold. Probing sends one minimal request carrying a 1×1 image; the measured result outranks the declaration. Consumes a little credit.',
   modelContextTiers: 'multi-tier',
   contextWindowUseMax: 'Use the largest window the upstream declares',
   contextWindowHint: 'The upstream declares several window tiers for some models: a default tier and larger ones. When on, the largest tier is reported to DSH; models without a larger tier are unaffected.',
   contextWindowEffect: 'The change applies to the next request; an ongoing conversation updates its display on the next send.',
+  contextWindowRefreshed: 'Refreshed the model catalog of {ok} account(s) ({failed} failed)',
+  contextWindowNoTiers: 'Enabled, but the current catalog declares no larger tier',
 
   usageSection: 'Usage',
   usageToday: 'Today',
@@ -297,6 +309,8 @@ interface PanelModel {
   supportedContextWindows: number[]
   maxTokens: number
   supportsImages: boolean
+  /** 图片能力的来源：上游声明、本地实测，或都没有。 */
+  imagesSource: 'declared' | 'probed' | 'none'
   credits?: string
   free: boolean
   visible: boolean
@@ -852,6 +866,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
         ),
         h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('modelsHint')),
         h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('reasoningProbeHint')),
+        h('p', { style: { ...S.sub, marginBottom: '8px' } }, t('modelImagesProbeHint')),
         // 窗口档位开关：上游给国际版声明了默认档（300k）与更大档（1M）
         h('label', { style: S.switchRow },
           h('input', {
@@ -859,10 +874,24 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
             checked: variant.useMaximumContextWindow,
             disabled: busyAny,
             onChange: () => {
-              void run(`ctxwindow:${variant.id}`, '/contextwindow', {
-                variantId: variant.id,
-                useMaximum: !variant.useMaximumContextWindow,
-              })
+              const useMaximum = !variant.useMaximumContextWindow
+              setNotice('')
+              setBusy(`ctxwindow:${variant.id}`)
+              void (async () => {
+                try {
+                  // 开启时会顺带刷目录，所以要看回执而不只是 document。
+                  const raw = await postPayload('/contextwindow', { variantId: variant.id, useMaximum })
+                  if (raw.document !== undefined) setDoc(raw.document)
+                  const ok = numField(raw, 'catalogsOk')
+                  const failed = numField(raw, 'catalogsFailed')
+                  setNotice(useMaximum
+                    ? (ok + failed === 0
+                      ? t('contextWindowNoTiers')
+                      : t('contextWindowRefreshed', { ok, failed }))
+                    : '')
+                  setError('')
+                } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
+              })()
             },
           }),
           h('span', null, t('contextWindowUseMax')),
@@ -876,6 +905,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
             variant.models.map(model => {
               const modelKey = `model:${variant.id}:${model.id}`
               const probeKey = `probe:${variant.id}:${model.id}`
+              const imageProbeKey = `image:${variant.id}:${model.id}`
               const tiers = contextTiers(model)
               // 上游声明了档位就不必探测；没声明且模型本身支持推理才给探测入口。
               const canProbe = model.effortsSource === 'none' && model.available
@@ -955,7 +985,27 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                   h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('modelImages')}:`),
                   h('span', {
                     style: { ...S.badge, ...(model.supportsImages ? S.badgeOk : S.badgeOff), fontSize: '10px', padding: '0 4px' },
-                  }, model.supportsImages ? t('modelImagesYes') : t('modelImagesNo')),
+                    title: model.imagesSource === 'probed' ? t('modelImagesProbed') : undefined,
+                  }, model.supportsImages
+                    ? `${t('modelImagesYes')}${model.imagesSource === 'probed' ? ` · ${t('modelImagesProbed')}` : ''}`
+                    : t('modelImagesNo')),
+                  model.available
+                    ? actionButton(imageProbeKey, t('modelImagesProbe'), () => {
+                      setBusy(imageProbeKey)
+                      setNotice('')
+                      void (async () => {
+                        try {
+                          const next = await postPayload('/model/probe-image', { variantId: variant.id, modelId: model.id })
+                          if (next.document !== undefined) setDoc(next.document)
+                          const r = next as unknown as { ok: boolean; supported?: boolean; detail?: string; error?: string }
+                          setNotice(`${model.name}: ${r.ok === true
+                            ? (r.supported === true ? t('modelImagesYes') : t('modelImagesNo'))
+                            : r.error ?? r.detail ?? t('reasoningNone')}`)
+                          setError('')
+                        } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
+                      })()
+                    }, t('modelImagesProbing'))
+                    : null,
                 ),
               )
             }),

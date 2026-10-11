@@ -29,6 +29,13 @@ export interface PluginStateData {
    */
   probedEfforts: Record<string, Record<string, string[]>>
   /**
+   * 探测得到的图片支持：`{ 变体id: { 模型id: true | false } }`。
+   *
+   * 上游对 CLI 名单里的模型一律声明支持图片，声明未必属实；这里存实测结论。
+   * 有实测值时面板以实测为准，并注明来源。
+   */
+  probedImages: Record<string, Record<string, boolean>>
+  /**
    * 逐版本「使用最大上下文窗口」：`{ 变体id: true }`。
    *
    * 上游给国际版声明了 `supportedLengths`（默认档 300k、最大档 1M），默认只用
@@ -68,6 +75,7 @@ export class PluginState {
       endpointEnabled: defaults.endpointEnabled ?? true,
       hiddenModels: { ...defaults.hiddenModels },
       probedEfforts: { ...defaults.probedEfforts },
+      probedImages: { ...defaults.probedImages },
       useMaximumContextWindow: { ...defaults.useMaximumContextWindow },
     }
   }
@@ -118,6 +126,20 @@ export class PluginState {
         }
         this.data.useMaximumContextWindow = next
       }
+      const images = document['probedImages']
+      if (isRecord(images)) {
+        const next: Record<string, Record<string, boolean>> = {}
+        for (const variant of WORKBUDDY_VARIANTS) {
+          const models = images[variant.id]
+          if (!isRecord(models)) continue
+          const bucket: Record<string, boolean> = {}
+          for (const [modelId, value] of Object.entries(models)) {
+            if (typeof value === 'boolean') bucket[modelId] = value
+          }
+          if (Object.keys(bucket).length > 0) next[variant.id] = bucket
+        }
+        this.data.probedImages = next
+      }
     } catch {
       // 损坏就按默认值走
     }
@@ -162,6 +184,21 @@ export class PluginState {
     return this.data.probedEfforts[variantId]?.[modelId] ?? []
   }
 
+  /** 某模型实测的图片支持；没测过时为 undefined（此时以上游声明为准）。 */
+  probedImageFor(variantId: string, modelId: string): boolean | undefined {
+    return this.data.probedImages[variantId]?.[modelId]
+  }
+
+  /** 记录一个模型实测的图片支持。 */
+  async setProbedImage(variantId: string, modelId: string, supported: boolean): Promise<void> {
+    const next = { ...this.data.probedImages }
+    const bucket = { ...(next[variantId] ?? {}) }
+    bucket[modelId] = supported
+    next[variantId] = bucket
+    this.data.probedImages = next
+    await this.persist()
+  }
+
   /** 该版本是否使用上游声明的最大上下文窗口。 */
   usesMaximumContextWindow(variantId: string): boolean {
     return this.data.useMaximumContextWindow[variantId] === true
@@ -201,6 +238,7 @@ export class PluginState {
       endpointEnabled: this.data.endpointEnabled,
       hiddenModels: this.data.hiddenModels,
       probedEfforts: this.data.probedEfforts,
+      probedImages: this.data.probedImages,
       useMaximumContextWindow: this.data.useMaximumContextWindow,
     }
     await mkdir(dirname(this.path), { recursive: true })

@@ -27,7 +27,7 @@ import { createHyperAdapter, type HyperAdapter } from './adapter.ts'
 import { parseHubExport } from './import.ts'
 import { createHyperShim, type HyperShim } from './shim.ts'
 import { PluginState } from './state.ts'
-import { checkin, pollLogin, probeEfforts, resolveContextWindow, startLogin } from './upstream.ts'
+import { checkin, pollLogin, probeEfforts, probeImage, resolveContextWindow, startLogin } from './upstream.ts'
 import { UsageLedger, type UsageSummary } from './usage.ts'
 import { WORKBUDDY_VARIANTS, variantFor, type WorkBuddyVariant } from './variants.ts'
 
@@ -84,6 +84,8 @@ interface PanelModel {
   supportedContextWindows: number[]
   maxTokens: number
   supportsImages: boolean
+  /** 图片能力的来源：上游声明、本地实测，或都没有。 */
+  imagesSource: 'declared' | 'probed' | 'none'
   credits?: string
   free: boolean
   /** 是否在选择器中可见。 */
@@ -409,6 +411,7 @@ export function apply(ctx: Context, config: Config): void {
           const probed = state.probedFor(variant.id, model.id)
           // 上游声明优先；没声明才用本地探测结果。
           const efforts = declared.length > 0 ? declared : probed
+          const probedImages = state.probedImageFor(variant.id, model.id)
           byId.set(model.id, {
             id: model.id,
             name: model.name,
@@ -416,7 +419,9 @@ export function apply(ctx: Context, config: Config): void {
             declaredContextWindow: model.contextWindow,
             supportedContextWindows: model.supportedContextWindows,
             maxTokens: model.maxTokens,
-            supportsImages: model.supportsImages,
+            // 实测优先：上游对 CLI 名单一律声明支持图片，声明未必属实。
+            supportsImages: probedImages ?? model.supportsImages,
+            imagesSource: probedImages === undefined ? (model.supportsImages ? 'declared' : 'none') : 'probed',
             ...model.billing.credits === undefined ? {} : { credits: model.billing.credits },
             free: model.billing.free,
             visible: !hidden.has(model.id),
@@ -438,6 +443,7 @@ export function apply(ctx: Context, config: Config): void {
           supportedContextWindows: [],
           maxTokens: 0,
           supportsImages: false,
+          imagesSource: 'none',
           free: false,
           visible: false,
           available: false,
@@ -552,6 +558,7 @@ export function apply(ctx: Context, config: Config): void {
         variantId: variant.id,
         hidden: () => state.hidden(variant.id),
         probedEfforts: (modelId: string) => state.probedFor(variant.id, modelId),
+        probedImage: (modelId: string) => state.probedImageFor(variant.id, modelId),
         useMaximumContextWindow: () => state.usesMaximumContextWindow(variant.id),
         // 图片必须走宿主的附件服务，否则声明了图片能力的模型一发图就报
         // 「pi-ai image input requires the durable attachment service」。
@@ -703,9 +710,21 @@ export function apply(ctx: Context, config: Config): void {
           json(res, 400, { ok: false, error: '未知的 variantId', document: panelDocument() })
           return
         }
-        await state.setMaximumContextWindow(variantId, body['useMaximum'] === true)
+        const useMaximum = body['useMaximum'] === true
+        // 档位只有 live 目录里才有；老缓存里没有这个字段，不刷就白开开关。
+        let catalogsOk = 0
+        let catalogsFailed = 0
+        if (useMaximum) {
+          for (const account of pool.list().filter(a => a.variantId === variantId)) {
+            try {
+              await pool.refreshCatalog(account.account, variantId)
+              catalogsOk += 1
+            } catch { catalogsFailed += 1 }
+          }
+        }
+        await state.setMaximumContextWindow(variantId, useMaximum)
         invalidate()
-        json(res, 200, { ok: true, document: panelDocument() })
+        json(res, 200, { ok: true, catalogsOk, catalogsFailed, document: panelDocument() })
       })
 
       // 用量：面板轮询时直接给现成的桶，不重扫流水文件。
@@ -803,6 +822,38 @@ export function apply(ctx: Context, config: Config): void {
             ok: result.aborted === '',
             ...result,
             ...result.aborted === '' ? {} : { error: result.detail.at(-1)?.reason ?? '探测中止' },
+            document: panelDocument(),
+          })
+        } catch (error: unknown) {
+          json(res, 200, { ok: false, error: String(error), document: panelDocument() })
+        }
+      })
+
+      // 图片支持探测：上游对 CLI 名单一律声明支持，实测才作数
+      mount(`${ROUTE_PREFIX}/model/probe-image`, async (req, res) => {
+        const body = await readJsonBody(req)
+        const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
+        const modelId = typeof body['modelId'] === 'string' ? body['modelId'] : ''
+        if (variantFor(variantId) === undefined || modelId === '') {
+          json(res, 400, { ok: false, error: '缺少 variantId 或 modelId', document: panelDocument() })
+          return
+        }
+        const account = pool.available(variantId)[0]
+        if (account === undefined) {
+          json(res, 200, { ok: false, error: '该版本没有可用账号', document: panelDocument() })
+          return
+        }
+        try {
+          const result = await probeImage(toCredential(account), modelId)
+          // 探测被限流/额度打断时结论不可信，不写状态。
+          if (result.aborted === '') {
+            await state.setProbedImage(variantId, modelId, result.supported)
+            invalidate()
+          }
+          json(res, 200, {
+            ok: result.aborted === '',
+            ...result,
+            ...result.aborted === '' ? {} : { error: result.detail },
             document: panelDocument(),
           })
         } catch (error: unknown) {
