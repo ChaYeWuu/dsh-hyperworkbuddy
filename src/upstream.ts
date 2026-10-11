@@ -346,6 +346,69 @@ function toUpstreamModel(row: Record<string, unknown>): UpstreamModel | undefine
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  const num = Number(value)
+  return Number.isFinite(num) && num > 0 ? num : undefined
+}
+
+/**
+ * 还原一条落盘缓存的模型记录。
+ *
+ * 缓存是插件自己写的，但版本升级会给 `UpstreamModel` 加字段，
+ * 旧缓存里就没有它们；直接强转会让消费者读到 undefined。
+ * 因此逐字段补默认值，读不出来的条目直接丢弃。
+ *
+ * @param value - 账号文件里的一条模型记录。
+ * @returns 归一化后的模型；缺少 id 时返回 undefined。
+ */
+export function parseUpstreamModel(value: unknown): UpstreamModel | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const row = value as Record<string, unknown>
+  const id = typeof row['id'] === 'string' ? row['id'] : ''
+  if (id === '') return undefined
+  const contextWindow = positiveNumber(row['contextWindow']) ?? 0
+  const lengths = row['supportedContextWindows']
+  const supportedContextWindows = Array.isArray(lengths)
+    ? [...new Set(lengths.map((n): number => Number(n)).filter((n): boolean => Number.isFinite(n) && n > 0))]
+      .sort((a, b) => a - b)
+    : []
+  const reasoningRaw = isRecord(row['reasoning']) ? row['reasoning'] : {}
+  const effortsRaw = reasoningRaw['supportedEfforts']
+  const supportedEfforts = Array.isArray(effortsRaw)
+    ? effortsRaw.filter((v): v is string => typeof v === 'string' && (EFFORT_VALUES as readonly string[]).includes(v))
+    : []
+  const billingRaw = isRecord(row['billing']) ? row['billing'] : {}
+  const credits = typeof billingRaw['credits'] === 'string' && billingRaw['credits'] !== ''
+    ? billingRaw['credits']
+    : undefined
+  return {
+    id,
+    name: typeof row['name'] === 'string' && row['name'] !== '' ? row['name'] : id,
+    maxInputTokens: positiveNumber(row['maxInputTokens']) ?? contextWindow,
+    contextWindow,
+    supportedContextWindows,
+    maxTokens: positiveNumber(row['maxTokens']) ?? 0,
+    supportsImages: row['supportsImages'] === true,
+    reasoning: {
+      supports: reasoningRaw['supports'] === true,
+      onlyReasoning: reasoningRaw['onlyReasoning'] === true,
+      ...supportedEfforts.length === 0 ? {} : { supportedEfforts },
+      ...typeof reasoningRaw['defaultEffort'] === 'string'
+        ? { defaultEffort: reasoningRaw['defaultEffort'] }
+        : {},
+      canDisableThinking: reasoningRaw['canDisableThinking'] === true,
+    },
+    billing: {
+      ...credits === undefined ? {} : { credits },
+      free: billingRaw['free'] === true,
+    },
+  }
+}
+
 /**
  * 按开关算出该模型实际生效的上下文窗口。
  *
@@ -359,7 +422,10 @@ function toUpstreamModel(row: Record<string, unknown>): UpstreamModel | undefine
 export function resolveContextWindow(info: UpstreamModel, useMaximum: boolean): number {
   const declared = info.contextWindow
   if (!useMaximum) return declared
-  const larger = info.supportedContextWindows.filter(length => length > declared && length <= info.maxInputTokens)
+  // 兜底：调用方可能拿到旧缓存里的记录，缺数组时按没有更大档位处理。
+  const tiers = Array.isArray(info.supportedContextWindows) ? info.supportedContextWindows : []
+  const ceiling = Number.isFinite(info.maxInputTokens) && info.maxInputTokens > 0 ? info.maxInputTokens : declared
+  const larger = tiers.filter(length => length > declared && length <= ceiling)
   return larger.length === 0 ? declared : Math.max(...larger)
 }
 

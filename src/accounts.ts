@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path'
 import type { WorkBuddyCredential } from './auth.ts'
 import { isExpiringSoon, readDesktopCredential } from './auth.ts'
 import { WORKBUDDY_VARIANTS, type WorkBuddyVariant } from './variants.ts'
-import { fetchCatalog, fetchCredits, refreshAccessToken, type CreditSnapshot, type UpstreamModel } from './upstream.ts'
+import { fetchCatalog, fetchCredits, parseUpstreamModel, refreshAccessToken, type CreditSnapshot, type UpstreamModel } from './upstream.ts'
 
 /** 一条被池管理的账号。 */
 export interface PoolAccount {
@@ -199,7 +199,9 @@ function parseAccount(value: unknown): PoolAccount | undefined {
     // 缓存读回来，重启后不必为看一眼余额就重新请求全部账号。
     ...credits === undefined ? {} : { credits },
     creditsAtMs: Number.isFinite(Number(value['creditsAtMs'])) ? Number(value['creditsAtMs']) : 0,
-    models: Array.isArray(value['models']) ? value['models'] as UpstreamModel[] : [],
+    models: Array.isArray(value['models'])
+      ? value['models'].map(parseUpstreamModel).filter((m): m is UpstreamModel => m !== undefined)
+      : [],
     modelsAtMs: Number.isFinite(Number(value['modelsAtMs'])) ? Number(value['modelsAtMs']) : 0,
     catalogSource: 'saved',
     catalogError: '',

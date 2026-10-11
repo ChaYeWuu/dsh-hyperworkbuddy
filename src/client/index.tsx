@@ -452,8 +452,17 @@ function formatTime(ms: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-/** 格式化剩余时长。 */
-function formatDuration(ms: number): string {
+/**
+ * 读模型的窗口档位。
+ *
+ * host 可能仍在用旧缓存回包（升级前的账号文件没有这个字段），
+ * 直接取 `.length` 会让整块面板渲染失败，所以统一从这里读。
+ */
+function contextTiers(model: PanelModel): number[] {
+  return Array.isArray(model.supportedContextWindows) ? model.supportedContextWindows : []
+}
+
+/** 格式化剩余时长。 */function formatDuration(ms: number): string {
   if (ms <= 0) return '0s'
   const seconds = Math.ceil(ms / 1000)
   if (seconds < 60) return `${seconds}s`
@@ -867,6 +876,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
             variant.models.map(model => {
               const modelKey = `model:${variant.id}:${model.id}`
               const probeKey = `probe:${variant.id}:${model.id}`
+              const tiers = contextTiers(model)
               // 上游声明了档位就不必探测；没声明且模型本身支持推理才给探测入口。
               const canProbe = model.effortsSource === 'none' && model.available
               return h('div', {
@@ -874,8 +884,8 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                 style: { ...S.modelCell, opacity: model.visible ? 1 : 0.55, flexDirection: 'column', alignItems: 'stretch', gap: '2px' },
                 title: [
                   model.id,
-                  model.supportedContextWindows.length > 1
-                    ? `${t('modelContext')}: ${model.supportedContextWindows.join(' / ')}`
+                  tiers.length > 1
+                    ? `${t('modelContext')}: ${tiers.join(' / ')}`
                     : '',
                   model.credits === undefined ? '' : `${model.credits} credits`,
                 ].filter(Boolean).join('\n'),
@@ -934,10 +944,10 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                 h('div', { style: { ...S.row, gap: '4px', paddingLeft: '22px' } },
                   h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('modelContext')}:`),
                   h('span', { style: { fontSize: '11px' } }, formatTokens(model.contextWindow)),
-                  model.supportedContextWindows.length > 1
+                  tiers.length > 1
                     ? h('span', {
                       style: { ...S.badge, ...S.badgeInfo, fontSize: '10px', padding: '0 4px' },
-                      title: model.supportedContextWindows.join(' / '),
+                      title: tiers.join(' / '),
                     }, t('modelContextTiers'))
                     : null,
                   h('span', { style: { ...S.muted, fontSize: '11px' } }, `${t('modelMaxOutput')}:`),
