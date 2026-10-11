@@ -100,6 +100,7 @@ const zh = {
   credits: '积分',
   creditsUnknown: '未获取',
   creditsAt: '更新于',
+  creditsCached: '（缓存）',
   packages: '套餐明细',
   packagesNone: '没有可用套餐',
   expiresAt: '到期',
@@ -204,6 +205,7 @@ const en: typeof zh = {
   credits: 'Credits',
   creditsUnknown: 'not fetched',
   creditsAt: 'updated',
+  creditsCached: ' (cached)',
   packages: 'Packages',
   packagesNone: 'no usable package',
   expiresAt: 'Expires',
@@ -565,6 +567,8 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
         : credits.total === undefined ? String(credits.remaining) : `${credits.remaining} / ${credits.total}`
     const useful = (credits?.packages ?? []).filter(pkg => (pkg.remain ?? 0) > 0)
     const pkgOpen = openPkgs[key] === true
+    // 与 host 侧的 CREDITS_TTL_MS 保持一致：超过 10 分钟即视为陈旧。
+    const creditsFresh = account.creditsAtMs > 0 && Date.now() - account.creditsAtMs < 10 * 60 * 1000
 
     return h('div', { style: S.accountRow, key },
       h('div', { style: { ...S.row, justifyContent: 'space-between' } },
@@ -598,7 +602,10 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
       ),
       h('div', { style: { ...S.row, marginTop: '6px', gap: '10px' } },
         h('span', null, `${t('credits')}: `, h('strong', null, creditsText)),
-        credits === undefined ? null : h('span', { style: S.muted }, `${t('creditsAt')} ${formatTime(account.creditsAtMs)}`),
+        credits === undefined ? null : h('span', { style: S.muted },
+          `${t('creditsAt')} ${formatTime(account.creditsAtMs)}`,
+          creditsFresh ? null : t('creditsCached'),
+        ),
         useful.length === 0 ? null : h('button', {
           style: S.btn,
           onClick: () => setOpenPkgs(prev => ({ ...prev, [key]: !pkgOpen })),

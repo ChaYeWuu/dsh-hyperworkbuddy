@@ -128,6 +128,14 @@ export async function resetEndpointKey(homeDir: string, custom?: string): Promis
 const COOLDOWN_BASE_MS = 60_000
 const COOLDOWN_MAX_MS = 3_600_000
 
+/**
+ * 积分缓存有效期。
+ *
+ * 余额不是秒级变化的数字，而每次读取都是一趟上游请求；16 个账号串行刷新很容易
+ * 撞上限流。10 分钟内的重复读取直接吃缓存，手动点刷新时仍会强制请求。
+ */
+const CREDITS_TTL_MS = 10 * 60 * 1000
+
 /** 账号文件路径。 */
 export function accountsPath(homeDir: string): string {
   return join(homeDir, ACCOUNTS_FILENAME)
@@ -135,6 +143,30 @@ export function accountsPath(homeDir: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** 从落盘数据里还原积分快照。 */
+function parseCredits(value: unknown): CreditSnapshot | undefined {
+  if (!isRecord(value)) return undefined
+  const packages: CreditSnapshot['packages'] = []
+  if (Array.isArray(value['packages'])) {
+    for (const raw of value['packages']) {
+      if (!isRecord(raw)) continue
+      packages.push({
+        name: typeof raw['name'] === 'string' ? raw['name'] : '(未命名)',
+        ...Number.isFinite(Number(raw['remain'])) ? { remain: Number(raw['remain']) } : {},
+        ...Number.isFinite(Number(raw['size'])) ? { size: Number(raw['size']) } : {},
+      })
+    }
+  }
+  const remaining = Number(value['remaining'])
+  const total = Number(value['total'])
+  if (!Number.isFinite(remaining) && !Number.isFinite(total) && packages.length === 0) return undefined
+  return {
+    ...Number.isFinite(remaining) ? { remaining } : {},
+    ...Number.isFinite(total) ? { total } : {},
+    packages,
+  }
 }
 
 /** 校验并归一化一条落盘账号。 */
@@ -145,6 +177,7 @@ function parseAccount(value: unknown): PoolAccount | undefined {
   if (account === '' || accessToken === '') return undefined
   const variantId = typeof value['variantId'] === 'string' ? value['variantId'] : ''
   if (variantId === '') return undefined
+  const credits = parseCredits(value['credits'])
   return {
     account,
     variantId,
@@ -160,7 +193,9 @@ function parseAccount(value: unknown): PoolAccount | undefined {
     failStreak: 0,
     lastError: '',
     lastUsedAtMs: 0,
-    creditsAtMs: 0,
+    // 缓存读回来，重启后不必为看一眼余额就重新请求全部账号。
+    ...credits === undefined ? {} : { credits },
+    creditsAtMs: Number.isFinite(Number(value['creditsAtMs'])) ? Number(value['creditsAtMs']) : 0,
     models: Array.isArray(value['models']) ? value['models'] as UpstreamModel[] : [],
     modelsAtMs: Number.isFinite(Number(value['modelsAtMs'])) ? Number(value['modelsAtMs']) : 0,
     catalogSource: 'saved',
@@ -462,15 +497,34 @@ export class AccountPool {
     return refreshed
   }
 
-  /** 刷新某账号的积分快照。 */
-  async refreshCredits(account: string, variantId: string): Promise<CreditSnapshot> {
+  /**
+   * 刷新某账号的积分快照。
+   *
+   * @param account - 账号标识。
+   * @param variantId - 变体 id。
+   * @param options - `force` 为真时跳过缓存强制请求（面板上手动点刷新）。
+   * @returns 积分快照。
+   */
+  async refreshCredits(
+    account: string,
+    variantId: string,
+    options: { force?: boolean } = {},
+  ): Promise<CreditSnapshot> {
     const target = this.accounts.find(a => a.account === account && a.variantId === variantId)
     if (target === undefined) throw new Error('账号不存在')
+    // 缓存还新鲜就直接用：余额不是秒级变化的数字，重复请求只会白吃限流。
+    if (options.force !== true && this.creditsAreFresh(target)) return target.credits!
     const snapshot = await fetchCredits(toCredential(target))
     target.credits = snapshot
     target.creditsAtMs = Date.now()
     await this.persist()
     return snapshot
+  }
+
+  /** 该账号的积分缓存是否还在有效期内。 */
+  creditsAreFresh(target: PoolAccount): boolean {
+    if (target.credits === undefined || target.creditsAtMs <= 0) return false
+    return Date.now() - target.creditsAtMs < CREDITS_TTL_MS
   }
 
   /**
@@ -543,6 +597,28 @@ export class AccountPool {
       }
     }
     return [...seen.values()]
+  }
+
+  /**
+   * 批量刷新全部账号的积分。
+   *
+   * @param options - `force` 为真时忽略缓存；`variantId` 限定版本。
+   * @returns 成功与失败的账号数。
+   */
+  async refreshAllCredits(options: { force?: boolean; variantId?: string } = {}): Promise<{ ok: number; failed: number }> {
+    let ok = 0
+    let failed = 0
+    for (const account of [...this.accounts]) {
+      if (account.disabled) continue
+      if (options.variantId !== undefined && account.variantId !== options.variantId) continue
+      try {
+        await this.refreshCredits(account.account, account.variantId, options)
+        ok += 1
+      } catch {
+        failed += 1
+      }
+    }
+    return { ok, failed }
   }
 
   /** 写回磁盘。 */

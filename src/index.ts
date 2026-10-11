@@ -15,7 +15,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { copyFile, mkdir, readFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -41,6 +41,9 @@ export const ROUTE_PREFIX = '/api-hyperworkbuddy'
 
 /** 桌面凭据重扫间隔（毫秒）。 */
 const DESKTOP_POLL_MS = 30_000
+
+/** 旧账号文件迁移完成标记；存在即不再迁移。 */
+const MIGRATION_MARKER_FILENAME = '.hyperworkbuddy-migrated'
 
 /** 配置。 */
 export interface Config {
@@ -256,8 +259,14 @@ export function apply(ctx: Context, config: Config): void {
    * 历史版本把 home 解析成 `$DSH_HOME`（`~/.dsh`），而 Desktop 版实际用 profile
    * 目录，于是同一台机器上会存在两份账号文件。这里在启动时把另一份里**更多的**
    * 那份合并进来，避免用户的账号看起来「凭空消失」。
+   *
+   * 只跑一次：迁移成功后写一个标记，之后即使旧文件账号更多也不再搬——否则用户
+   * 在当前 home 里删掉几个账号，下次启动又会被旧文件「还原」，看起来像删不掉。
    */
   async function migrateLegacyState(): Promise<void> {
+    const marker = join(resolvedHome, MIGRATION_MARKER_FILENAME)
+    if (existsSync(marker)) return
+
     const candidates = [
       // 环境变量指向的根（旧行为）
       process.env['DSH_HOME'] === undefined || process.env['DSH_HOME'] === ''
@@ -276,6 +285,7 @@ export function apply(ctx: Context, config: Config): void {
       } catch { targetCount = 0 }
     }
 
+    let migrated = false
     for (const source of candidates) {
       if (!existsSync(source)) continue
       let sourceCount = 0
@@ -291,9 +301,18 @@ export function apply(ctx: Context, config: Config): void {
         await copyFile(source, target)
         ctx.logger.info(`hyperworkbuddy: 已从旧位置迁移 ${sourceCount} 个账号（${source}）`)
         targetCount = sourceCount
+        migrated = true
       } catch (error: unknown) {
         ctx.logger.warn(`hyperworkbuddy: 迁移旧账号文件失败 ${String(error)}`)
       }
+    }
+
+    // 只有真的搬过才落标记：没找到旧文件时留空，下次启动仍有机会发现它们。
+    if (!migrated) return
+    try {
+      await writeFile(marker, new Date().toISOString(), 'utf8')
+    } catch (error: unknown) {
+      ctx.logger.warn(`hyperworkbuddy: 迁移标记写入失败 ${String(error)}`)
     }
   }
 
@@ -662,24 +681,24 @@ export function apply(ctx: Context, config: Config): void {
           json(res, 400, { ok: false, error: '未知的 variantId', document: panelDocument() })
           return
         }
+        // 面板上的一次点击就是「我现在就要最新的」，所以这里忽略积分缓存。
+        const force = body['force'] !== false
         let catalogsOk = 0
         let catalogsFailed = 0
-        let creditsOk = 0
-        let creditsFailed = 0
         for (const account of pool.list().filter(a => a.variantId === variantId)) {
           try {
             await pool.refreshCatalog(account.account, variantId)
             catalogsOk += 1
           } catch { catalogsFailed += 1 }
-          try {
-            await pool.refreshCredits(account.account, variantId)
-            creditsOk += 1
-          } catch { creditsFailed += 1 }
         }
+        const credits = await pool.refreshAllCredits({ variantId, force })
         invalidate()
         json(res, 200, {
           ok: true,
-          catalogsOk, catalogsFailed, creditsOk, creditsFailed,
+          catalogsOk,
+          catalogsFailed,
+          creditsOk: credits.ok,
+          creditsFailed: credits.failed,
           document: panelDocument(),
         })
       })
@@ -889,7 +908,8 @@ export function apply(ctx: Context, config: Config): void {
         const account = typeof body['account'] === 'string' ? body['account'] : ''
         const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
         try {
-          await pool.refreshCredits(account, variantId)
+          // 单个账号的「刷新积分」按钮：强制请求，尊重用户明确意图。
+          await pool.refreshCredits(account, variantId, { force: true })
           json(res, 200, { ok: true, document: panelDocument() })
         } catch (error: unknown) {
           json(res, 200, { ok: false, error: String(error), document: panelDocument() })
