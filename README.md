@@ -105,6 +105,17 @@
 4. 重启 DSH。桌面 App 不捆绑 pnpm，用系统里已装的那个即可；版本过旧会在 pnpm store
    上报错，升级 pnpm 后重试。
 
+### 方式四：命令行安装（web / CLI profile）
+
+上面的 `desktop` profile 只能走 App，但 `web` 等 CLI profile 可以用标准命令安装：
+
+```sh
+dsh plugin --profile web add github:ChaYeWuu/dsh-hyperworkbuddy
+```
+
+必须写 `github:` 前缀——本包不在 npm 上，写成裸包名会去 npm 找然后 404。装完同样要
+完全退出并重启 DSH。
+
 ### 版本要求
 
 插件要求 DSH 内核 `^0.2.0-rc.1`（桌面版 `0.2.0-rc.2` 满足）。内核不兼容时插件页会
