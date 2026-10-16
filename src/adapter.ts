@@ -16,6 +16,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { AccountPool } from './accounts.ts'
+import { formatCredits } from './credits.ts'
 import type { HyperShim } from './shim.ts'
 import type { UpstreamModel } from './upstream.ts'
 import { resolveContextWindow } from './upstream.ts'
@@ -99,9 +100,11 @@ function toPiModel(
   probed: readonly string[],
   useMaximumContextWindow: boolean,
 ): Model<Api> {
+  const creditsText = formatCredits(info.billing.credits)
   return {
     id: info.id,
-    name: info.name,
+    // 倍率并进显示名：DSH 选择器只渲染 name，模型 id 不带这个信息。
+    name: creditsText === '' ? info.name : `${info.name} (${creditsText})`,
     api: 'openai-completions',
     provider: providerId,
     baseUrl,

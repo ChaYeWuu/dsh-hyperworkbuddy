@@ -9,6 +9,7 @@
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import * as React from 'react'
+import { formatCredits } from '../credits.ts'
 
 /** 稳定浏览器插件名。 */
 export const name = 'dsh-hyperworkbuddy-client'
@@ -125,6 +126,7 @@ const zh = {
   reasoningProbeHint: '上游未声明档位时可手动探测：逐个档位发一条最小请求，只采纳上游接受的档位。会消耗少量额度。',
   modelContext: '上下文',
   modelMaxOutput: '最大输出',
+  modelCredits: '倍率',
   modelContextTiers: '多档',
   contextWindowUseMax: '使用上游声明的最大窗口',
   contextWindowHint: '上游为部分模型声明了多档窗口：默认档与更大档。开启后按最大档上报给 DSH，只影响声明了更大档位的模型。',
@@ -258,6 +260,7 @@ const en: typeof zh = {
   reasoningProbeHint: 'When the upstream declares no levels, probe them: one minimal request per level, keeping only the accepted ones. Consumes a little credit.',
   modelContext: 'Context',
   modelMaxOutput: 'Max output',
+  modelCredits: 'Rate',
   modelContextTiers: 'multi-tier',
   contextWindowUseMax: 'Use the largest window the upstream declares',
   contextWindowHint: 'The upstream declares several window tiers for some models: a default tier and larger ones. When on, the largest tier is reported to DSH; models without a larger tier are unaffected.',
@@ -957,6 +960,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
               const modelKey = `model:${variant.id}:${model.id}`
               const probeKey = `probe:${variant.id}:${model.id}`
               const tiers = contextTiers(model)
+              const modelCreditsText = formatCredits(model.credits)
               // 上游声明了档位就不必探测；没声明且模型本身支持推理才给探测入口。
               const canProbe = model.effortsSource === 'none' && model.available
               return h('div', {
@@ -967,7 +971,7 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                   tiers.length > 1
                     ? `${t('modelContext')}: ${tiers.join(' / ')}`
                     : '',
-                  model.credits === undefined ? '' : `${model.credits} credits`,
+                  modelCreditsText === '' ? '' : `${t('modelCredits')}: ${modelCreditsText}`,
                 ].filter(Boolean).join('\n'),
               },
                 h('label', { style: { ...S.row, gap: '6px', cursor: 'pointer' } },
@@ -981,6 +985,10 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
                   }),
                   h('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, model.name),
                   busy === modelKey ? h('span', { style: S.muted }, '…') : null,
+                  modelCreditsText === '' ? null : h('span', {
+                    style: { ...S.badge, ...S.badgeInfo, fontSize: '10px', padding: '0 4px' },
+                    title: t('modelCredits'),
+                  }, modelCreditsText),
                   model.free ? h('span', { style: { ...S.badge, ...S.badgeOk } }, '免费') : null,
                   model.available ? null : h('span', { style: { ...S.badge, ...S.badgeOff } }, t('gone')),
                 ),
