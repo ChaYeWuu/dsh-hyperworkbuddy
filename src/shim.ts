@@ -65,11 +65,22 @@ const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
   session_dead: 401,
   not_found: 502,
   server: 502,
+  intercepted: 429,
   client: 400,
 }
 
 /** 值得换号的失败类别：换一个账号重试有意义。 */
 const FAILOVER_KINDS: ReadonlySet<UpstreamErrorKind> = new Set<UpstreamErrorKind>([
+  'hard_credit', 'soft_rate', 'session_dead', 'server', 'intercepted',
+])
+
+/**
+ * 值得冷却账号的失败类别。
+ *
+ * 比换号集合少一个 `intercepted`：拦截是上游瞬时风控、与账号本身无关，一次
+ * 爆发里把整池账号都冷却掉，只会让下一个请求直接撞上「没有可用账号」。
+ */
+const COOLDOWN_KINDS: ReadonlySet<UpstreamErrorKind> = new Set<UpstreamErrorKind>([
   'hard_credit', 'soft_rate', 'session_dead', 'server',
 ])
 
@@ -278,7 +289,7 @@ export function createHyperShim(options: HyperShimOptions): HyperShim {
         account.account,
         account.variantId,
         `${result.kind}: ${result.message}`,
-        FAILOVER_KINDS.has(result.kind),
+        COOLDOWN_KINDS.has(result.kind),
       )
       logger?.warn(`hyperworkbuddy: 账号 ${account.account} 失败（${result.kind}），尝试下一个`)
       if (!FAILOVER_KINDS.has(result.kind)) break
@@ -302,7 +313,16 @@ export function createHyperShim(options: HyperShimOptions): HyperShim {
       totalTokens: 0,
       elapsedMs: Date.now() - startedAtMs,
     })
-    writeOpenAIError(res, KIND_STATUS[last.kind], last.kind, `全部账号均失败，最后一个错误：${last.message}`)
+    // 确定性失败（如「模型不支持该思考强度」）会提前跳出循环，此时并未试完所有
+    // 账号；照实报出试了几个，别让用户以为账号池全废了。
+    writeOpenAIError(
+      res,
+      KIND_STATUS[last.kind],
+      last.kind,
+      tried.size >= candidates.length
+        ? `全部账号均失败，最后一个错误：${last.message}`
+        : `已尝试 ${tried.size}/${candidates.length} 个账号，最后一个错误：${last.message}`,
+    )
   }
 
   /**

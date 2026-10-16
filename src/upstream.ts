@@ -18,6 +18,7 @@ export type UpstreamErrorKind =
   | 'session_dead'
   | 'not_found'
   | 'server'
+  | 'intercepted'
   | 'client'
 
 /** chat 结果：成功带原始响应，失败带分类与可展示文案。 */
@@ -79,6 +80,14 @@ const HARD_CREDIT_MARKERS = [
 const SESSION_DEAD_MARKERS = ['Offline user session not found', '12153'] as const
 
 /**
+ * 上游瞬时风控的标识：HTTP 400 + 「请求被拦截，请重新发送」。
+ *
+ * 实测同一时刻并发的其他请求照常出字，说明不是凭据或请求体的问题，换个账号
+ * 重试就能过；这句文案由上游下发，插件自身从不产生它。
+ */
+const INTERCEPTED_MARKERS = ['请求被拦截', '请重新发送'] as const
+
+/**
  * 上游「这个模型不存在」的标识。
  *
  * 两区实测都是 HTTP 400 + `code: 11102` + `msg: model [...] service info not found`，
@@ -103,6 +112,10 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
   }
   for (const marker of SESSION_DEAD_MARKERS) {
     if (body.includes(marker)) return 'session_dead'
+  }
+  // 拦截要排在 client 兜底之前：它同样带 HTTP 400，但换号重试有意义。
+  for (const marker of INTERCEPTED_MARKERS) {
+    if (body.includes(marker)) return 'intercepted'
   }
   if (status === 429) return 'soft_rate'
   if (status === 404) return 'not_found'
