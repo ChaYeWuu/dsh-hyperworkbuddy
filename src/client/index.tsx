@@ -54,6 +54,9 @@ const zh = {
   refreshAllHint: '刷新该版本全部账号的模型与积分。',
   checkinAll: '一键签到',
   checkinDone: '签到完成：成功 {ok} / {total}',
+  autoCheckin: '每日自动签到',
+  autoCheckinHint: '每天第一次轮询时自动签到，只试一次；失败可手动点「一键签到」。',
+  autoCheckinDay: '上次自动签到：{day}',
   externalEndpoint: '对外端点',
   linkLogin: '链接登录',
   linkLoginHint: '在浏览器里完成授权即可自动加账号，无需手动复制 token。',
@@ -188,6 +191,9 @@ const en: typeof zh = {
   refreshAllHint: 'Refresh models and credits for every account in this variant.',
   checkinAll: 'Daily check-in',
   checkinDone: 'Check-in: {ok} / {total} succeeded',
+  autoCheckin: 'Automatic daily check-in',
+  autoCheckinHint: 'Checks in on the first poll of each day, one attempt only — use “Daily check-in” to retry.',
+  autoCheckinDay: 'Last automatic check-in: {day}',
   externalEndpoint: 'External endpoint',
   linkLogin: 'Sign in via link',
   linkLoginHint: 'Authorise in your browser and the account is added automatically — no token copying.',
@@ -351,6 +357,10 @@ interface PanelVariant {
   externalError: string
   /** 该版本是否支持每日签到（只有国内版）。 */
   hasCheckin: boolean
+  /** 该版本是否开着每日自动签到。 */
+  autoCheckin: boolean
+  /** 自动签到上次尝试的日期（`YYYY-MM-DD`），没试过时为空串。 */
+  checkinDay: string
   /** 该版本是否使用上游声明的最大上下文窗口。 */
   useMaximumContextWindow: boolean
   providerRegistered: boolean
@@ -891,6 +901,41 @@ function HyperWorkBuddyPanel(props: PanelInjected): unknown {
               }),
             ),
         ),
+        // 自动签到：只有国内版有签到接口，所以跟着 hasCheckin 一起出现
+        isCollapsed || !variant.hasCheckin
+          ? null
+          : h('div', { style: { ...S.row, marginTop: '6px', flexWrap: 'wrap' } },
+            h('label', { style: S.switchRow },
+              h('input', {
+                type: 'checkbox',
+                checked: variant.autoCheckin,
+                disabled: busyAny,
+                onChange: () => {
+                  const enabled = !variant.autoCheckin
+                  setNotice('')
+                  setBusy(`autocheckin:${variant.id}`)
+                  void (async () => {
+                    try {
+                      const raw = await postPayload('/variant/autocheckin', { variantId: variant.id, enabled })
+                      if (raw.document !== undefined) setDoc(raw.document)
+                      const failure = typeof raw['error'] === 'string' ? raw['error'] : ''
+                      if (failure !== '') setNotice(failure)
+                      setError('')
+                    } catch (err: unknown) { setError(String(err)) } finally { setBusy('') }
+                  })()
+                },
+              }),
+              h('span', null, t('autoCheckin')),
+              busy === `autocheckin:${variant.id}` ? h('span', { style: S.muted }, '⟳') : null,
+            ),
+            // 旧版 document 没有这个字段，缺字段时整行不渲染，别显示「undefined」。
+            variant.checkinDay
+              ? h('span', { style: S.muted }, t('autoCheckinDay', { day: variant.checkinDay }))
+              : null,
+          ),
+        isCollapsed || !variant.hasCheckin
+          ? null
+          : h('p', { style: { ...S.sub, marginTop: '4px' } }, t('autoCheckinHint')),
       ),
 
       isCollapsed ? null : h('div', null,

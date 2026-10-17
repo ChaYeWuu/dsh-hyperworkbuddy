@@ -133,6 +133,10 @@ interface PanelVariant {
   externalError: string
   /** 该版本是否支持每日签到（只有国内版）。 */
   hasCheckin: boolean
+  /** 该版本是否开着每日自动签到。 */
+  autoCheckin: boolean
+  /** 自动签到上次尝试的日期（`YYYY-MM-DD`），没试过时为空串。 */
+  checkinDay: string
   /** 该版本是否使用上游声明的最大上下文窗口。 */
   useMaximumContextWindow: boolean
   /** provider 是否已注册（与对外端点开关无关）。 */
@@ -387,6 +391,7 @@ export function apply(ctx: Context, config: Config): void {
             lastDesktopError = pool.refreshError
           }
           await pool.refreshExpiringTokens()
+          await runAutoCheckin()
           invalidate()
         } catch (error: unknown) {
           ctx.logger.warn(`hyperworkbuddy: 账号轮询失败 ${String(error)}`)
@@ -394,6 +399,48 @@ export function apply(ctx: Context, config: Config): void {
       })()
     }, DESKTOP_POLL_MS)
     pollTimer.unref?.()
+  }
+
+  /** 本地日期，形如 `2026-10-17`。 */
+  function todayKey(): string {
+    const now = new Date()
+    const month = String(now.getMonth() + 1).padStart(2, '0')
+    const day = String(now.getDate()).padStart(2, '0')
+    return `${now.getFullYear()}-${month}-${day}`
+  }
+
+  /**
+   * 开着自动签到的版本，每天签一次。
+   *
+   * 挂在轮询心跳里而不是定时到某个整点：桌面 App 未必整天开着，开机后第一次
+   * 心跳就该补上。一天只尝试一次——失败多半是上游抖动，反复重试只会把失败放大，
+   * 当天剩下的时间留给用户手动点「一键签到」。
+   */
+  async function runAutoCheckin(): Promise<void> {
+    const day = todayKey()
+    for (const variant of WORKBUDDY_VARIANTS) {
+      if (!variant.hasCheckin) continue
+      if (!state.autoCheckinEnabled(variant.id)) continue
+      if (state.lastCheckinDay(variant.id) === day) continue
+      const accounts = pool.list().filter(a => a.variantId === variant.id && !a.disabled)
+      if (accounts.length === 0) continue
+      // 先记日期再发请求：即便中途崩溃或重启，也不会在同一天反复打上游。
+      await state.markCheckinDay(variant.id, day)
+      for (const account of accounts) {
+        try {
+          const result = await checkin(toCredential(account))
+          if (!result.ok) {
+            ctx.logger.warn(`hyperworkbuddy: ${account.account} 自动签到失败 ${result.message}`)
+          }
+        } catch (error: unknown) {
+          ctx.logger.warn(`hyperworkbuddy: ${account.account} 自动签到失败 ${String(error)}`)
+        }
+      }
+      // 签到可能发积分，顺手刷一次让面板立刻反映
+      for (const account of accounts) {
+        await pool.refreshCredits(account.account, variant.id).catch(() => undefined)
+      }
+    }
   }
 
   /** 通知 DSH 模型列表变化。 */
@@ -504,6 +551,8 @@ export function apply(ctx: Context, config: Config): void {
         externalRunning: runtime.external !== undefined,
         externalError: runtime.externalError,
         hasCheckin: variant.hasCheckin,
+        autoCheckin: state.autoCheckinEnabled(variant.id),
+        checkinDay: state.lastCheckinDay(variant.id),
         useMaximumContextWindow: useMaximum,
         providerRegistered: runtime.registered,
         providerError: runtime.error,
@@ -830,6 +879,28 @@ export function apply(ctx: Context, config: Config): void {
           await pool.refreshCredits(account.account, variantId).catch(() => undefined)
         }
         json(res, 200, { ok: true, results, document: panelDocument() })
+      })
+
+      // 每日自动签到开关：只对支持签到的版本生效，打开时立刻补一次
+      mount(`${ROUTE_PREFIX}/variant/autocheckin`, async (req, res) => {
+        const body = await readJsonBody(req)
+        const variantId = typeof body['variantId'] === 'string' ? body['variantId'] : ''
+        const variant = variantFor(variantId)
+        if (variant === undefined) {
+          json(res, 400, { ok: false, error: '未知的 variantId', document: panelDocument() })
+          return
+        }
+        if (!variant.hasCheckin) {
+          json(res, 200, { ok: false, error: '该版本没有签到功能', document: panelDocument() })
+          return
+        }
+        const enabled = body['enabled'] === true
+        await state.setAutoCheckin(variantId, enabled)
+        // 打开时清掉当天记录：用户此刻就在面板前，希望马上看到签到结果。
+        if (enabled) await state.markCheckinDay(variantId, '')
+        json(res, 200, { ok: true, document: panelDocument() })
+        // 补签放后台：面板不必等它跑完，心跳会在下一次补上。
+        if (enabled) void runAutoCheckin().catch(() => undefined)
       })
 
       // 推理档位探测：上游没声明档位的模型，靠逐档位试请求测出可用集合

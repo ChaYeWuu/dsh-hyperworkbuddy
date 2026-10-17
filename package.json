@@ -2,7 +2,7 @@
   "name": "dsh-hyperworkbuddy",
   "displayName": "DSH HyperWorkBuddy",
   "description": "WorkBuddy 多账号管理与 DSH 直连模型：设置里一级 WorkBuddy 面板管理多账号池，同时把模型直接接进 DSH 并暴露 OpenAI 兼容端点。",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "ChaYeWuu",
   "keywords": [
     "dsh-plugin",

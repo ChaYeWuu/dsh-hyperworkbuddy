@@ -35,6 +35,19 @@ export interface PluginStateData {
    * 默认档；打开后抬到最大档。国内版上游不声明档位，这里对它没有意义。
    */
   useMaximumContextWindow: Record<string, boolean>
+  /**
+   * 逐版本「每日自动签到」：`{ 变体id: true }`。
+   *
+   * 只有国内版有签到接口；国际版即便写了也不会触发。
+   */
+  autoCheckin: Record<string, boolean>
+  /**
+   * 自动签到最近一次的尝试日期：`{ 变体id: 'YYYY-MM-DD' }`。
+   *
+   * 记「尝试过」而不是「成功过」：签到失败多半是上游抖动，每轮都重试只会把
+   * 失败放大，当天剩下的时间留给用户手动点一键签到。
+   */
+  checkinDay: Record<string, string>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -69,6 +82,8 @@ export class PluginState {
       hiddenModels: { ...defaults.hiddenModels },
       probedEfforts: { ...defaults.probedEfforts },
       useMaximumContextWindow: { ...defaults.useMaximumContextWindow },
+      autoCheckin: { ...defaults.autoCheckin },
+      checkinDay: { ...defaults.checkinDay },
     }
   }
 
@@ -117,6 +132,23 @@ export class PluginState {
           if (maximum[variant.id] === true) next[variant.id] = true
         }
         this.data.useMaximumContextWindow = next
+      }
+      const auto = document['autoCheckin']
+      if (isRecord(auto)) {
+        const next: Record<string, boolean> = {}
+        for (const variant of WORKBUDDY_VARIANTS) {
+          if (auto[variant.id] === true) next[variant.id] = true
+        }
+        this.data.autoCheckin = next
+      }
+      const days = document['checkinDay']
+      if (isRecord(days)) {
+        const next: Record<string, string> = {}
+        for (const variant of WORKBUDDY_VARIANTS) {
+          const day = days[variant.id]
+          if (typeof day === 'string' && day !== '') next[variant.id] = day
+        }
+        this.data.checkinDay = next
       }
     } catch {
       // 损坏就按默认值走
@@ -194,6 +226,39 @@ export class PluginState {
     await this.persist()
   }
 
+  /** 该版本是否开着每日自动签到。 */
+  autoCheckinEnabled(variantId: string): boolean {
+    return this.data.autoCheckin[variantId] === true
+  }
+
+  /** 设置「每日自动签到」并落盘。 */
+  async setAutoCheckin(variantId: string, enabled: boolean): Promise<void> {
+    const next = { ...this.data.autoCheckin }
+    if (enabled) next[variantId] = true
+    else delete next[variantId]
+    this.data.autoCheckin = next
+    await this.persist()
+  }
+
+  /** 该版本自动签到上次尝试的日期（`YYYY-MM-DD`），没试过时为空串。 */
+  lastCheckinDay(variantId: string): string {
+    return this.data.checkinDay[variantId] ?? ''
+  }
+
+  /**
+   * 记下自动签到在某天已尝试过。
+   *
+   * @param variantId - 变体 id。
+   * @param day - `YYYY-MM-DD`；空串表示清掉记录。
+   */
+  async markCheckinDay(variantId: string, day: string): Promise<void> {
+    const next = { ...this.data.checkinDay }
+    if (day === '') delete next[variantId]
+    else next[variantId] = day
+    this.data.checkinDay = next
+    await this.persist()
+  }
+
   /** 写回磁盘。 */
   async persist(): Promise<void> {
     const document = {
@@ -202,6 +267,8 @@ export class PluginState {
       hiddenModels: this.data.hiddenModels,
       probedEfforts: this.data.probedEfforts,
       useMaximumContextWindow: this.data.useMaximumContextWindow,
+      autoCheckin: this.data.autoCheckin,
+      checkinDay: this.data.checkinDay,
     }
     await mkdir(dirname(this.path), { recursive: true })
     const temp = `${this.path}.${process.pid}.tmp`
