@@ -7,6 +7,7 @@
  * @module dsh-hyperworkbuddy/upstream
  */
 
+import { randomUUID } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
 import { normalizeEpoch } from './auth.ts'
 import { AI_VARIANT, CN_VARIANT, type WorkBuddyVariant } from './variants.ts'
@@ -191,10 +192,29 @@ function commonHeaders(credential: WorkBuddyCredential): Record<string, string> 
   }
 }
 
+/**
+ * 渠道校验头。
+ *
+ * 国际版网关自 2026-10-16 起对 `POST /v2/chat/completions` 做渠道校验：缺任一
+ * `X-Conversation-*` 头直接回 400 `code=11128 conversation id missing`，文案是
+ * 「请求被拦截，请重新发送」。国内线路带与不带都能过，仍统一发出去，省得分叉。
+ *
+ * 每次请求现造三个新 UUID：上游不按这组 id 存历史（换新 id 结果相同），它只是
+ * 渠道标记；新 id 也避免并发的子代理挤在同一个会话上。
+ */
+function conversationHeaders(): Record<string, string> {
+  return {
+    'X-Conversation-ID': randomUUID(),
+    'X-Conversation-Request-ID': randomUUID(),
+    'X-Conversation-Message-ID': randomUUID(),
+  }
+}
+
 /** chat 头：带 X-No-* 约定，绝不携带 refresh token。 */
 export function chatHeaders(credential: WorkBuddyCredential, userAgent: string, clientVersion: string): Record<string, string> {
   return {
     ...commonHeaders(credential),
+    ...conversationHeaders(),
     'User-Agent': userAgent,
     'Content-Type': 'application/json',
     ...credential.uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': credential.uid },
