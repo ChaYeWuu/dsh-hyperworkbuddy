@@ -69,10 +69,23 @@ const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
   client: 400,
 }
 
-/** 值得换号的失败类别：换一个账号重试有意义。 */
+/**
+ * 值得换号的失败类别：换一个账号重试有意义。
+ *
+ * 不含 `intercepted`：实测拦截会在同一秒把整池账号一起拒掉（上游按来源而非
+ * 按账号判定），换号只是把同一个失败重演一遍，白白多打 N 次上游。
+ */
 const FAILOVER_KINDS: ReadonlySet<UpstreamErrorKind> = new Set<UpstreamErrorKind>([
-  'hard_credit', 'soft_rate', 'session_dead', 'server', 'intercepted',
+  'hard_credit', 'soft_rate', 'session_dead', 'server',
 ])
+
+/**
+ * 被拦截后原地重试前的等待。
+ *
+ * 拦截是上游的瞬时风控，实测几十秒内自行解除；先等一小会儿再用同一个账号试
+ * 一次，能把这类短抖动直接吃掉，又不至于让用户干等。
+ */
+const INTERCEPTED_RETRY_DELAY_MS = 1_200
 
 /**
  * 值得冷却账号的失败类别。
@@ -270,8 +283,13 @@ export function createHyperShim(options: HyperShimOptions): HyperShim {
     const startedAtMs = Date.now()
     let last: { status: number; kind: UpstreamErrorKind; message: string } | undefined
     const tried = new Set<string>()
+    /** 拦截只原地重试一次，免得上游一直拦时把延迟叠加起来。 */
+    let interceptedRetried = false
+    /** 下一次循环强制使用的账号：被拦截后要拿同一个账号再试一次。 */
+    let pendingRetry: PoolAccount | undefined
     for (let attempt = 0; attempt < candidates.length; attempt++) {
-      const account = pickAccount(candidates, tried, sessionKey)
+      const account = pendingRetry ?? pickAccount(candidates, tried, sessionKey)
+      pendingRetry = undefined
       if (account === undefined) break
       tried.add(`${account.account}|${account.variantId}`)
       const result: ChatResult = await chatCompletions(toCredential(account), raw, controller.signal)
@@ -291,6 +309,23 @@ export function createHyperShim(options: HyperShimOptions): HyperShim {
         `${result.kind}: ${result.message}`,
         COOLDOWN_KINDS.has(result.kind),
       )
+
+      // 拦截与账号无关，换号只是重演同一个失败；先原地等一下再用同一个账号试
+      // 一次，能吃掉短抖动。再失败就如实返回，别把整池账号挨个打一遍。
+      if (result.kind === 'intercepted' && !interceptedRetried && !controller.signal.aborted) {
+        interceptedRetried = true
+        logger?.warn(`hyperworkbuddy: 账号 ${account.account} 被上游拦截，${INTERCEPTED_RETRY_DELAY_MS}ms 后原地重试一次`)
+        await new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, INTERCEPTED_RETRY_DELAY_MS)
+          timer.unref?.()
+          controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+        })
+        if (controller.signal.aborted) break
+        pendingRetry = account
+        attempt -= 1
+        continue
+      }
+
       logger?.warn(`hyperworkbuddy: 账号 ${account.account} 失败（${result.kind}），尝试下一个`)
       if (!FAILOVER_KINDS.has(result.kind)) break
       if (controller.signal.aborted) break
@@ -315,13 +350,17 @@ export function createHyperShim(options: HyperShimOptions): HyperShim {
     })
     // 确定性失败（如「模型不支持该思考强度」）会提前跳出循环，此时并未试完所有
     // 账号；照实报出试了几个，别让用户以为账号池全废了。
+    const scope = tried.size >= candidates.length
+      ? '全部账号均失败'
+      : `已尝试 ${tried.size}/${candidates.length} 个账号`
     writeOpenAIError(
       res,
       KIND_STATUS[last.kind],
       last.kind,
-      tried.size >= candidates.length
-        ? `全部账号均失败，最后一个错误：${last.message}`
-        : `已尝试 ${tried.size}/${candidates.length} 个账号，最后一个错误：${last.message}`,
+      last.kind === 'intercepted'
+        // 拦截是上游按来源判定的瞬时风控，与账号无关，说清这点用户才不会去删号。
+        ? `${scope}，最后一个错误：${last.message}。这是上游的瞬时风控，账号本身没有问题，稍等片刻重试即可`
+        : `${scope}，最后一个错误：${last.message}`,
     )
   }
 

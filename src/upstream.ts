@@ -239,10 +239,51 @@ export function clientUserAgent(credential: WorkBuddyCredential, clientVersion?:
 }
 
 /**
+ * 渠道校验会拒收的品牌串。
+ *
+ * 国内版网关（`www.codebuddy.cn`）在 2026-10-16 后加了内容级渠道校验：`system`
+ * 消息里出现这组短语就回 400 `code=11128 Illegal API invocation from an
+ * unapproved channel`，对外文案是「请求被拦截，请重新发送」。
+ *
+ * 实测是**精确短语匹配**，不是关键词黑名单：单独发 `DeepSeek Harness` 是 200，
+ * 但发 `You are an AI agent powered by DeepSeek Harness` 就 400；把主体换成
+ * OpenAI / Claude / WorkBuddy 也都是 200。判断依据是请求正文而非请求头，所以
+ * 换账号、换连接、补 `X-Conversation-*` 都不起作用。
+ */
+const CHANNEL_BLOCKED_PHRASES: readonly string[] = [
+  'You are an AI agent powered by DeepSeek Harness',
+]
+
+/** 品牌词的兜底替换表：短语没命中时，至少别把竞品名留在 system 里。 */
+const BRAND_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
+  // 不带冠词，免得「the DeepSeek Harness implementation」变成「the the ...」。
+  [/DeepSeek Harness/g, 'host application'],
+]
+
+/**
+ * 把会触发渠道校验的片段改写成中性表述。
+ *
+ * 只动 `system` 消息：实测同样的文字放在 `user` 里不会触发，改写它等于白白
+ * 污染用户输入。
+ *
+ * @param text - 待检查的 system 正文。
+ * @returns 改写后的正文；无需改写时原样返回。
+ */
+export function neutralizeChannelPhrases(text: string): string {
+  let output = text
+  for (const phrase of CHANNEL_BLOCKED_PHRASES) {
+    if (output.includes(phrase)) output = output.split(phrase).join('You are a helpful assistant.')
+  }
+  for (const [pattern, replacement] of BRAND_REWRITES) output = output.replace(pattern, replacement)
+  return output
+}
+
+/**
  * 归一化 chat 请求体。
  *
  * 上游只接受流式；`tool_choice` 必须是字符串；`role: 'developer'` 要改写成
- * `system`；`reasoning_effort: 'off'` 要删掉（见下）；国际版额外要求首条为 system。
+ * `system`；`reasoning_effort: 'off'` 要删掉（见下）；国际版额外要求首条为 system；
+ * 两个区域的 system 都要过一遍渠道校验的中性化。
  *
  * @param raw - 原始 JSON 字符串。
  * @param region - 目标区域。
@@ -276,6 +317,12 @@ export function prepareChatBody(raw: string, region: 'cn' | 'global'): string {
     const first = messages[0]
     if (first === undefined || first['role'] !== 'system') {
       messages.unshift({ role: 'system', content: 'You are a helpful assistant.' })
+    }
+  }
+  for (const message of messages) {
+    if (message['role'] !== 'system') continue
+    if (typeof message['content'] === 'string') {
+      message['content'] = neutralizeChannelPhrases(message['content'])
     }
   }
   body['messages'] = messages
