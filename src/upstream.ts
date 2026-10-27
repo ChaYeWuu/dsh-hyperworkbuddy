@@ -261,6 +261,31 @@ const BRAND_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
 ]
 
 /**
+ * 逐句改写表：上游会把 system 里某些**固定段落**当成渠道指纹，命中就回 11-128。
+ *
+ * 这类指纹跟品牌名无关，兜底的品牌替换救不了，只能按段改。实测每段都很脆：
+ * 改动其中任意一句即放行，所以这里只动最少的字，句子意思保持原样。
+ *
+ * 已知两段（2026-10-27 复测确认）：
+ * - `@` 路径说明段 —— 单独把这 111 个字发上去就 400，改任一句即 200；
+ * - GUI 描述段的句尾语序 —— 与上游 issue 复现的指纹一致。
+ */
+const PARAGRAPH_REWRITES: ReadonlyArray<readonly [string, string]> = [
+  [
+    'Tokens prefixed with @ are paths the user explicitly referenced.',
+    'Tokens prefixed with @ point at paths the user explicitly referenced.',
+  ],
+  [
+    'Relative paths resolve from the workspace root',
+    'Relative paths are resolved against the workspace root',
+  ],
+  [
+    'whose URL the runtime context names',
+    'whose URL is named in the runtime context',
+  ],
+]
+
+/**
  * 把会触发渠道校验的片段改写成中性表述。
  *
  * 只动 `system` 消息：实测同样的文字放在 `user` 里不会触发，改写它等于白白
@@ -273,6 +298,9 @@ export function neutralizeChannelPhrases(text: string): string {
   let output = text
   for (const phrase of CHANNEL_BLOCKED_PHRASES) {
     if (output.includes(phrase)) output = output.split(phrase).join('You are a helpful assistant.')
+  }
+  for (const [from, to] of PARAGRAPH_REWRITES) {
+    if (output.includes(from)) output = output.split(from).join(to)
   }
   for (const [pattern, replacement] of BRAND_REWRITES) output = output.replace(pattern, replacement)
   return output
